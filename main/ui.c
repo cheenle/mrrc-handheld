@@ -27,6 +27,13 @@
 
 static const char *TAG = "ui";
 
+/* UI-task liveness.  Bumped every ui_task loop iteration; the network
+ * supervisor watches it and restarts the board if the UI task wedges inside
+ * an SPI/lcd call (the one thing the task watchdog is not subscribed to). */
+volatile uint32_t g_ui_heartbeat;
+/* TEMP-DIAG: which blocking region the ui task is in when it wedges. */
+volatile int g_ui_phase;
+
 #define FB_W 240
 #define FB_H 240
 
@@ -416,6 +423,7 @@ static void ui_task(void *arg)
 
     while (1) {
         app_shared_t snap;
+        g_ui_phase = 1; /* app_lock */
         app_lock();
         snap = g_app;
         app_unlock();
@@ -423,6 +431,9 @@ static void ui_task(void *arg)
         int64_t now_us = esp_timer_get_time();
         int64_t now_ms = now_us / 1000;
         bool dirty = false;
+
+        g_ui_heartbeat++;
+        g_ui_phase = 2; /* body */
 
         /* A full repaint every 10 s is a cheap safety net: it guarantees the
          * screen can never be left showing a stale value forever. */
@@ -463,6 +474,8 @@ static void ui_task(void *arg)
         }
 
         if (snap.spec_seq != last_spec) {
+            g_ui_phase = 3; /* spectrum draw */
+
             int64_t gap = 1000000 / UI_FPS;
             if (now_us - last_frame_us >= gap) {
                 last_spec = snap.spec_seq;
@@ -482,6 +495,7 @@ static void ui_task(void *arg)
             board_display_flush(0, Y_LBL, FB_W, 13);
         }
 
+        g_ui_phase = 0;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

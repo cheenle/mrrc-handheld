@@ -806,12 +806,32 @@ static void net_task(void *arg)
     wifi_start();
     int64_t last_rssi_ms = 0;
     int64_t ctrl_down_since = 0;
+    uint32_t last_ui_hb = 0;
+    int64_t ui_stall_ms = 0;
 
     while (1) {
         int64_t now = esp_timer_get_time() / 1000;
 
         g_app.wifi_up = s_wifi_up;
         g_app.ctrl_up = s_ctrl.up;
+
+        /* The UI task is the only writer of the framebuffer and the only
+         * caller into the SPI/lcd driver.  A wedged SPI transaction would
+         * otherwise freeze the display forever with no recovery path: this
+         * watchdog restarts the board so the screen comes back on its own. */
+        extern volatile uint32_t g_ui_heartbeat;
+        if (g_ui_heartbeat == last_ui_hb) {
+            ui_stall_ms += 500;
+            if (ui_stall_ms > 10000) {
+                extern volatile int g_ui_phase;
+                ESP_LOGE(TAG, "UI task stalled %lld ms (phase=%d) — restarting",
+                         (long long)ui_stall_ms, g_ui_phase);
+                esp_restart();
+            }
+        } else {
+            last_ui_hb = g_ui_heartbeat;
+            ui_stall_ms = 0;
+        }
 
         if (s_wifi_up && now - last_rssi_ms > 5000) {
             last_rssi_ms = now;

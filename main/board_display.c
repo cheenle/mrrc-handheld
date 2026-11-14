@@ -5,20 +5,23 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "driver/ledc.h"
-#include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_ops.h"
-#include "esp_lcd_panel_vendor.h"
 
 static const char *TAG = "disp";
 
 #define CHUNK_ROWS 16
 
-static esp_lcd_panel_handle_t    s_panel;
-static esp_lcd_panel_io_handle_t s_io;
-static uint16_t                 *s_fb;      /* 240x240 RGB565, PSRAM */
-static uint16_t                 *s_dma;     /* CHUNK_ROWS lines, internal RAM */
+static spi_device_handle_t s_spi;
+static uint16_t           *s_fb;      /* 240x240 RGB565, PSRAM */
+/* Two ping-pong line buffers.  The SPI colour write is DMA-free (polling),
+ * but we still double-buffer so the next chunk's pack never races the
+ * controller's own line latch. */
+static uint16_t           *s_dma[2];
+static int                 s_dma_cur;
 
 void *board_psram_alloc(size_t bytes)
 {
@@ -34,6 +37,43 @@ void *board_psram_alloc(size_t bytes)
 uint16_t *board_display_fb(void)
 {
     return s_fb;
+}
+
+/* ── ST7789 low-level (polling SPI, no DMA) ──────────────────────── */
+/* The stock esp_lcd_panel_io_spi driver queues the colour DMA and waits on
+ * portMAX_DELAY for completion.  On this board the GDMA eventually wedges
+ * after minutes of streaming and the UI task blocks forever in
+ * spi_device_get_trans_result(); the only robust fix is to stop using DMA for
+ * the display entirely.  Polling the SPI FIFO cannot stall: the master always
+ * finishes clocking out the bits it was given. */
+
+static void lcd_cmd(uint8_t cmd)
+{
+    gpio_set_level(PIN_LCD_DC, 0);
+    spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
+    spi_device_polling_transmit(s_spi, &t);
+}
+
+static void lcd_data(const uint8_t *data, size_t len)
+{
+    gpio_set_level(PIN_LCD_DC, 1);
+    spi_transaction_t t = { .length = len * 8, .tx_buffer = data };
+    spi_device_polling_transmit(s_spi, &t);
+}
+
+static void lcd_flush_region(int x0, int y0, int w, int h, const uint16_t *px)
+{
+    uint8_t b[4];
+    lcd_cmd(0x2A);                       /* CASET */
+    b[0] = (x0 >> 8) & 0xFF; b[1] = x0 & 0xFF;
+    b[2] = ((x0 + w - 1) >> 8) & 0xFF; b[3] = (x0 + w - 1) & 0xFF;
+    lcd_data(b, 4);
+    lcd_cmd(0x2B);                       /* RASET */
+    b[0] = (y0 >> 8) & 0xFF; b[1] = y0 & 0xFF;
+    b[2] = ((y0 + h - 1) >> 8) & 0xFF; b[3] = (y0 + h - 1) & 0xFF;
+    lcd_data(b, 4);
+    lcd_cmd(0x2C);                       /* RAMWR */
+    lcd_data((const uint8_t *)px, (size_t)w * h * 2);
 }
 
 static void backlight_pwm_init(void)
@@ -70,7 +110,7 @@ void board_display_backlight(int percent)
 
 void board_display_flush(int x, int y, int w, int h)
 {
-    if (!s_panel || !s_fb) return;
+    if (!s_spi || !s_fb) return;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > LCD_H_RES) w = LCD_H_RES - x;
@@ -79,14 +119,14 @@ void board_display_flush(int x, int y, int w, int h)
 
     for (int row = 0; row < h; row += CHUNK_ROWS) {
         int rows = (h - row > CHUNK_ROWS) ? CHUNK_ROWS : (h - row);
-        /* Pack the stripe (the fb is full-width, so copy line by line). */
+        uint16_t *buf = s_dma[s_dma_cur & 1];
+        s_dma_cur++;
         for (int r = 0; r < rows; r++) {
-            memcpy(s_dma + r * w,
+            memcpy(buf + r * w,
                    s_fb + (y + row + r) * LCD_H_RES + x,
                    (size_t)w * sizeof(uint16_t));
         }
-        esp_lcd_panel_draw_bitmap(s_panel, x, y + row, x + w, y + row + rows,
-                                  s_dma);
+        lcd_flush_region(x, y + row, w, rows, buf);
     }
 }
 
@@ -94,6 +134,21 @@ esp_err_t board_display_init(void)
 {
     backlight_pwm_init();
     board_display_backlight(80);
+
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << PIN_LCD_DC) | (1ULL << PIN_LCD_RST),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+
+    /* Hardware reset: RST is active-low on this flex. */
+    gpio_set_level(PIN_LCD_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(PIN_LCD_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     spi_bus_config_t buscfg = {
         .mosi_io_num     = PIN_LCD_MOSI,
@@ -105,49 +160,45 @@ esp_err_t board_display_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    esp_lcd_panel_io_spi_config_t io_cfg = {
-        .dc_gpio_num       = PIN_LCD_DC,
-        .cs_gpio_num       = PIN_LCD_CS,
-        .pclk_hz           = 24 * 1000 * 1000,   /* 40 MHz corrupted rows on this flex */
-        .lcd_cmd_bits      = 8,
-        .lcd_param_bits    = 8,
-        .spi_mode          = 0,
-        .trans_queue_depth = 10,
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 24 * 1000 * 1000,   /* 40 MHz corrupted rows on this flex */
+        .mode           = 0,
+        .spics_io_num   = PIN_LCD_CS,
+        .queue_size     = 1,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)SPI2_HOST,
-                                             &io_cfg, &s_io));
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &s_spi));
 
-    esp_lcd_panel_dev_config_t panel_cfg = {
-        .reset_gpio_num = PIN_LCD_RST,
-        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_RGB,
-        .bits_per_pixel = 16,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(s_io, &panel_cfg, &s_panel));
-
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
-    ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
+    /* ST7789 init, byte-for-byte what esp_lcd_panel_st7789 did. */
+    lcd_cmd(0x01);                       /* SWRESET */
+    vTaskDelay(pdMS_TO_TICKS(120));
+    lcd_cmd(0x11);                       /* SLPOUT */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    lcd_cmd(0x36);                       /* MADCTL: RGB, no mirror/swap */
+    { uint8_t d = 0x00; lcd_data(&d, 1); }
+    lcd_cmd(0x3A);                       /* COLMOD: 16-bit */
+    { uint8_t d = 0x55; lcd_data(&d, 1); }
+    lcd_cmd(0xB0);                       /* RAMCTRL: big endian */
+    { uint8_t d[2] = { 0x00, 0xF0 }; lcd_data(d, 2); }
 #if LCD_INVERT
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel, true));
+    lcd_cmd(0x21);                       /* INVON */
 #endif
-    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel, false));
-    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel, false, false));
     /* VSCRSADD (0x37) takes TWO parameter bytes.  Sending one desynchronises
-     * the command stream and every later command lands shifted — that is what
-     * turned ordinary ghosting into a garbled screen. */
-    uint8_t scroll[2] = { 0x00, 0x00 };
-    esp_lcd_panel_io_tx_param(s_io, 0x37, scroll, 2);
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
+     * the command stream and every later command lands shifted. */
+    { uint8_t d[2] = { 0x00, 0x00 }; lcd_cmd(0x37); lcd_data(d, 2); }
+    lcd_cmd(0x29);                       /* DISPON */
 
     size_t fb_bytes = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
+    size_t dma_bytes = LCD_H_RES * CHUNK_ROWS * sizeof(uint16_t);
     s_fb = board_psram_alloc(fb_bytes);
-    s_dma = heap_caps_malloc(LCD_H_RES * CHUNK_ROWS * sizeof(uint16_t),
-                             MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!s_fb || !s_dma) {
-        ESP_LOGE(TAG, "framebuffer allocation failed (fb=%p dma=%p)", s_fb, s_dma);
+    s_dma[0] = heap_caps_malloc(dma_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_dma[1] = heap_caps_malloc(dma_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_fb || !s_dma[0] || !s_dma[1]) {
+        ESP_LOGE(TAG, "framebuffer allocation failed (fb=%p dma0=%p dma1=%p)",
+                 s_fb, s_dma[0], s_dma[1]);
         return ESP_ERR_NO_MEM;
     }
     memset(s_fb, 0, fb_bytes);
-    ESP_LOGI(TAG, "ST7789 240x240 up, free heap=%u, min=%u",
+    ESP_LOGI(TAG, "ST7789 240x240 up (polling SPI), free heap=%u, min=%u",
              (unsigned)esp_get_free_heap_size(),
              (unsigned)esp_get_minimum_free_heap_size());
     return ESP_OK;
