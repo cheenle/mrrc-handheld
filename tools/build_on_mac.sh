@@ -9,7 +9,9 @@
 set -euo pipefail
 
 MAC=${MAC:-cheenle@192.168.1.228}
-REMOTE=~/dev/mrrc-handheld
+# NOTE: must stay a *relative* path — an unquoted ~ is expanded locally and
+# becomes /home/... which macOS refuses to create (autofs owns /home).
+REMOTE=dev/mrrc-handheld
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT=${MRRC_PORT:-$(ls /dev/ttyACM* 2>/dev/null | head -1)}
 
@@ -20,7 +22,7 @@ rsync -a --delete \
       "$HERE/" "$MAC:$REMOTE/"
 
 echo "== build on mac-mini =="
-ssh "$MAC" 'cd '"$REMOTE"' && zsh -c ". ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build" 2>&1 | tail -20
+ssh "$MAC" "cd $REMOTE && zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
 
 echo "== fetch artefacts =="
 mkdir -p "$HERE/build-mac"
