@@ -78,8 +78,6 @@ static char s_token[96];
 static char s_hdr[160];
 static volatile bool s_wifi_up;
 static volatile bool s_tx_active;
-static volatile uint32_t s_st_rx_frames, s_st_tx_frames, s_st_rx_err, s_st_tx_bytes;
-static volatile uint32_t s_wifi_dc, s_ws_dc;
 static volatile bool s_force_rx;
 
 bool mrrc_take_force_rx(void)
@@ -89,16 +87,6 @@ bool mrrc_take_force_rx(void)
     return f;
 }
 
-uint32_t mrrc_wifi_disconnects(void) { return s_wifi_dc; }
-uint32_t mrrc_ws_disconnects(void) { return s_ws_dc; }
-
-void mrrc_get_stats(uint32_t *rx, uint32_t *tx, uint32_t *err, uint32_t *txb)
-{
-    if (rx)  *rx  = s_st_rx_frames;
-    if (tx)  *tx  = s_st_tx_frames;
-    if (err) *err = s_st_rx_err;
-    if (txb) *txb = s_st_tx_bytes;
-}
 static int s_wifi_retry;
 
 /* ── RX ring buffer (WS task -> audio task) ──────────────────────── */
@@ -386,9 +374,7 @@ static void ws_common_event(ws_ctx_t *c, int32_t id, void *event_data)
     case WEBSOCKET_EVENT_DISCONNECTED:
     case WEBSOCKET_EVENT_CLOSED:
         if (c->up) {
-            s_ws_dc++;
-            ESP_LOGW(TAG, "%s disconnected (total ws drops %u)", c->name,
-                     (unsigned)s_ws_dc);
+            ESP_LOGW(TAG, "%s disconnected", c->name);
         }
         c->up = false;
         c->acc_len = 0;
@@ -453,8 +439,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_up = false;
-        s_wifi_dc++;
-        ESP_LOGW(TAG, "wifi disconnected #%u", (unsigned)s_wifi_dc);
+        ESP_LOGW(TAG, "wifi disconnected");
         if (++s_wifi_retry < CONFIG_MRRC_WIFI_MAX_RETRY) {
             ESP_LOGW(TAG, "wifi disconnected, retry %d", s_wifi_retry);
             esp_wifi_connect();
@@ -656,11 +641,13 @@ static void audio_task(void *arg)
 #if CONFIG_MRRC_AUDIO_PCM
     const int tx_rate = 48000;
 #else
-    const int tx_rate = 48000;      /* encode at 48 kHz: same path as the browser,
-                                     * which is known-good on this server */
+    const int tx_rate = 16000;      /* factory: OpusEncoderWrapper(16000, 1, 60 ms) */
 #endif
-    const int tx_frame = tx_rate / 50;               /* 20 ms */
+    const int tx_frame = tx_rate / 50;               /* 20 ms read chunk */
     const int mic_frame = 320;                       /* 20 ms @ 16 kHz from the mic */
+    const int enc_frame = tx_rate * 60 / 1000;       /* 60 ms = 960 samples, as factory */
+    static int16_t encbuf[960];
+    static int encfill;
     /* Local speaker volume, changed live by the VOL knob (never the radio's
      * AF gain — that one stays a server-side setting). */
     int spk_gain = g_app.spk_vol > 0 ? g_app.spk_vol : CONFIG_MRRC_SPK_VOLUME;
@@ -674,13 +661,13 @@ static void audio_task(void *arg)
         dec = NULL;
     }
     err = 0;
-    OpusEncoder *enc = opus_encoder_create(tx_rate, 1, OPUS_APPLICATION_VOIP, &err);
+    OpusEncoder *enc = opus_encoder_create(tx_rate, 1, OPUS_APPLICATION_AUDIO, &err);
     if (err != OPUS_OK) {
         ESP_LOGE(TAG, "opus encoder create failed (%d)", err);
         enc = NULL;
     } else {
-        opus_encoder_ctl(enc, OPUS_SET_BITRATE(CONFIG_MRRC_TX_BITRATE > 20000 ? CONFIG_MRRC_TX_BITRATE : 24000));
-        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(3));
+        opus_encoder_ctl(enc, OPUS_SET_BITRATE(16000));   /* voice, 16 kHz mono */
+        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));   /* factory: WiFi board */
         opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
         opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(10));
@@ -703,51 +690,36 @@ static void audio_task(void *arg)
                 /* The server keys the radio (a CAT write) and then reopens its
                  * TX stream, clearing the queue — do not race that. */
                 vTaskDelay(pdMS_TO_TICKS(200));
-                { extern void board_mic_dump_once(void); board_mic_dump_once(); }
                 board_mic_read(mic, (size_t)tx_frame);   /* drop pre-key audio */
                 board_mic_read(mic, (size_t)tx_frame);
                 while (rb_get_frame(frame, sizeof frame, 0) > 0) { }  /* drop stale RX */
             }
-            size_t got = board_mic_take(mic, (size_t)tx_frame);
+            size_t got = board_mic_take(encbuf + encfill, (size_t)tx_frame);
             if (got < (size_t)tx_frame) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+            encfill += (int)got;
+            if (encfill < enc_frame) continue;      /* wait for a full 60 ms frame */
+            encfill = 0;
+            memcpy(mic, encbuf, enc_frame * sizeof(int16_t));
             int peak = 0;
-            for (int i = 0; i < tx_frame; i++) {
+            for (int i = 0; i < enc_frame; i++) {
                 int a = mic[i] < 0 ? -mic[i] : mic[i];
                 if (a > peak) peak = a;
                 mic[i] = (int16_t)s16_apply_gain(mic[i], mic_gain);
             }
-            {
-                static int n, acc;
-                if (peak > acc) acc = peak;
-                if (++n >= 50) {       /* ~1 s while keyed */
-                    extern radio_state_t *mrrc_state_ptr(void);
-                    extern int32_t board_mic_raw_peak(void);
-                    radio_state_t *rst = mrrc_state_ptr();
-                    ESP_LOGI(TAG, "tx mic peak %d%% raw %ld pwr=%dW alc=%d%% "
-                             "txst=%d", acc * 100 / 32768,
-                             (long)board_mic_raw_peak(), rst->power_w,
-                             (int)(rst->alc_pct + 0.5f), rst->tx_status);
-                    n = 0;
-                    acc = 0;
-                }
-            }
+            (void)peak;
 #if CONFIG_MRRC_AUDIO_OPUS
             if (enc) {
-                int bytes = opus_encode(enc, mic, tx_frame, out + 1,
+                int bytes = opus_encode(enc, mic, enc_frame, out + 1,
                                         (opus_int32)(sizeof(out) - 1));
                 if (bytes > 0) {
                     out[0] = 0x01;
                     mrrc_tx_frame(out, (size_t)bytes + 1);
-                    s_st_tx_frames++;
-                    s_st_tx_bytes += (uint32_t)bytes + 1;
                 }
             }
 #else
             out[0] = 0x00;
             memcpy(out + 1, mic, (size_t)tx_frame * 2);
             mrrc_tx_frame(out, (size_t)tx_frame * 2 + 1);
-            s_st_tx_frames++;
-            s_st_tx_bytes += (uint32_t)tx_frame * 2 + 1;
 #endif
             continue;
         }
@@ -784,7 +756,6 @@ static void audio_task(void *arg)
                 pcm[i] = (int16_t)s16_apply_gain(pcm[i], spk_gain);
             }
             board_spk_write(pcm, n);
-            s_st_rx_frames++;
         }
 #if CONFIG_MRRC_AUDIO_OPUS
         else if (tag == 0x01 && dec) {
@@ -794,9 +765,7 @@ static void audio_task(void *arg)
                     pcm[i] = (int16_t)s16_apply_gain(pcm[i], spk_gain);
                 }
                 board_spk_write(pcm, (size_t)samples);
-                s_st_rx_frames++;
-            } else {
-                s_st_rx_err++;
+                } else {
                 static uint32_t bad;
                 if ((bad++ % 50) == 0) ESP_LOGW(TAG, "opus decode err %d", samples);
             }

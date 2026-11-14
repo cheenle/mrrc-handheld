@@ -4,4 +4,3 @@
 void ui_start(void);
 
 /* Debug: hex-PPM dump of the framebuffer to the console. */
-void ui_dump_fb(void);

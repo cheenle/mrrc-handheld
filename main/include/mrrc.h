@@ -22,9 +22,6 @@ void mrrc_tx_stop_text(void);                               /* "s:" */
 bool mrrc_ctrl_up(void);
 
 /* Audio path counters (rx frames played, tx frames sent, decode errors). */
-void mrrc_get_stats(uint32_t *rx, uint32_t *tx, uint32_t *err, uint32_t *tx_bytes);
-uint32_t mrrc_wifi_disconnects(void);
-uint32_t mrrc_ws_disconnects(void);
 
 /* True once if the server force-released our PTT (liveness/FT8/CQ). */
 bool mrrc_take_force_rx(void);

@@ -43,8 +43,10 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
-# Log level
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Log level: warnings and errors only.  Every log line costs a USB-Serial-JTAG
+# transaction and formatting time on the very core that runs the audio pump.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 
 # TLS: four concurrent wss sockets on a 512 KB internal heap.
 # Default 16 KB in/out records x4 would not fit; 4 KB in covers the

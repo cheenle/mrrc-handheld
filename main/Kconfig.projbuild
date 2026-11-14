@@ -51,23 +51,6 @@ menu "MRRC Handheld"
             default 12
     endmenu
 
-    menu "Development"
-        config MRRC_ACOUSTIC_SWEEP
-            bool "Boot-time microphone frequency-response sweep"
-            default n
-            help
-                Plays 200 Hz ... 3.6 kHz tones on the speaker and measures the
-                microphone's response at each frequency.  Useful to tell a deaf
-                microphone from a mis-wired one.
-
-        config MRRC_DEV_SELFTEST
-            bool "Boot-time self test (auto PTT + framebuffer dumps)"
-            default n
-            help
-                Keys the transmitter ~45 s after boot for 5 s and dumps the
-                framebuffer twice.  Never enable this on a radio left on air.
-    endmenu
-
     menu "Audio"
         choice MRRC_AUDIO_CODEC
             prompt "Uplink codec"

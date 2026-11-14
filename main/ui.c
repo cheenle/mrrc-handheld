@@ -486,35 +486,6 @@ static void ui_task(void *arg)
     }
 }
 
-/* Debug: print the framebuffer as a hex PPM on the console.
- * Triggered by holding VOL+ and VOL- together, or once automatically. */
-void ui_dump_fb(void)
-{
-    if (!s_fb) return;
-    printf("\n===FBDUMP-P6-240-240-255===\n");
-    static const char hx[] = "0123456789abcdef";
-    char line[FB_W * 6 + 2];
-    for (int y = 0; y < FB_H; y++) {
-        int o = 0;
-        for (int x = 0; x < FB_W; x++) {
-            uint16_t c = s_fb[y * FB_W + x];
-            unsigned char rgb[3] = {
-                (unsigned char)(((c >> 11) & 0x1F) * 255 / 31),
-                (unsigned char)(((c >> 5) & 0x3F) * 255 / 63),
-                (unsigned char)((c & 0x1F) * 255 / 31),
-            };
-            for (int k = 0; k < 3; k++) {
-                line[o++] = hx[rgb[k] >> 4];
-                line[o++] = hx[rgb[k] & 0xF];
-            }
-        }
-        line[o++] = '\n';
-        fwrite(line, 1, (size_t)o, stdout);
-    }
-    printf("===FBDUMP-END===\n");
-    fflush(stdout);
-}
-
 void ui_start(void)
 {
     s_fb = board_display_fb();

@@ -23,7 +23,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
-#include "driver/gpio.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
 #include "board_pins.h"
@@ -241,41 +240,9 @@ void app_main(void)
     app_show_toast("MRRC BOOT");
 
     int64_t last_batt = 0;
-    int64_t last_hb_log = 0;
-
-    int dump_stage = 0;
-    int hold_ms = 0;
 
     while (1) {
         int64_t t = now_ms();
-
-        /* Debug hook: one automatic dump (15 s in), plus VOL+ + VOL- held
-         * together for 1.5 s.  Lets the UI be inspected without a camera. */
-#ifdef CONFIG_MRRC_DEV_SELFTEST
-        if (dump_stage == 0 && t > 12000) { dump_stage = 1; ui_dump_fb(); }
-        else if (dump_stage == 1 && t > 26000) { dump_stage = 2; ui_dump_fb(); }
-
-        /* DEV: reproducible PTT self-test (keys the radio briefly).
-         *   45 s  ptt:true + txhb, no mic frames  (dead carrier, 2 s)
-         *   47 s  mic frames start
-         *   50 s  frames stop, "s:", ptt:false                          */
-        if (dump_stage == 2 && t > 45000 && t < 47000 && g_app.ptt == PTT_IDLE) {
-            ptt_begin();
-            ESP_LOGW(TAG, "SELFTEST: PTT keyed (no audio)");
-        } else if (dump_stage == 2 && t > 47200 && t < 70000 && g_app.ptt == PTT_KEYING) {
-            mrrc_tx_set_active(true);
-        } else if (dump_stage == 2 && t > 70000 && g_app.ptt == PTT_KEYING) {
-            ESP_LOGW(TAG, "SELFTEST: PTT release");
-            ptt_end();
-        }
-#endif
-        if (gpio_get_level(PIN_BTN_VOL_UP) == 0 &&
-            gpio_get_level(PIN_BTN_VOL_DN) == 0) {
-            hold_ms += 20;
-            if (hold_ms == 1520) ui_dump_fb();
-        } else {
-            hold_ms = 0;
-        }
 
         /* Persist the volume a second after the last click, not per click. */
         app_lock();
@@ -284,8 +251,6 @@ void app_main(void)
         g_app.spk_vol_dirty = false;
         app_unlock();
         if (vol_dirty) {
-            static int64_t vol_saved_ms;
-            vol_saved_ms = t;
             vTaskDelay(pdMS_TO_TICKS(1000));
             app_lock();
             int vol_final = g_app.spk_vol;
@@ -319,29 +284,6 @@ void app_main(void)
             case INPUT_VOL_DOWN:    step(-1);        break;
             default: break;
             }
-        }
-
-        /* Heartbeat: a headless box is undebuggable without this. */
-        if (t - last_hb_log >= 10000) {
-            last_hb_log = t;
-            app_lock();
-            int32_t f = g_app.st.freq_hz;
-            int sm = g_app.st.s_meter;
-            bool wu = g_app.wifi_up, cu = g_app.ctrl_up;
-            int rssi = g_app.rssi;
-            int32_t seq = (int32_t)g_app.spec_seq;
-            app_unlock();
-            uint32_t arx = 0, atx = 0, aerr = 0, atb = 0;
-            mrrc_get_stats(&arx, &atx, &aerr, &atb);
-            ESP_LOGI(TAG, "hb: wifi=%d ctrl=%d rssi=%d freq=%ld s=%d spec=%ld "
-                     "audio(rx=%lu tx=%lu err=%lu txB=%lu) drops(wifi=%lu ws=%lu) "
-                     "heap=%u min=%u", wu, cu, rssi, (long)f, sm, (long)seq,
-                     (unsigned long)arx, (unsigned long)atx,
-                     (unsigned long)aerr, (unsigned long)atb,
-                     (unsigned long)mrrc_wifi_disconnects(),
-                     (unsigned long)mrrc_ws_disconnects(),
-                     (unsigned)esp_get_free_heap_size(),
-                     (unsigned)esp_get_minimum_free_heap_size());
         }
 
         app_lock();
