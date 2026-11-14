@@ -211,8 +211,8 @@ mrrc-handheld/
 
 | 项 | 值 |
 |---|---|
-| Wi-Fi SSID / 密码 | `REDACTED` / `REDACTED` |
+| Wi-Fi SSID / 密码 | 本地配置（不提交） |
 | MRRC 服务器 | `ba4eg.mrrc.vlsc.net:443`（wss，Let's Encrypt 证书走内置 bundle） |
-| Web 密码 | `REDACTED` |
+| Web 密码 | 本地配置（不提交） |
 
-改法：`idf.py menuconfig` → `MRRC Handheld`，或直接改 `main/Kconfig.projbuild` 的 default。
+改法：`idf.py menuconfig` → `MRRC Handheld`（值只写进本地 `sdkconfig`，不入库）；`main/Kconfig.projbuild` 的 default 已清空。

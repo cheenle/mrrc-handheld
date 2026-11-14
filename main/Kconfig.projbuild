@@ -3,10 +3,10 @@ menu "MRRC Handheld"
     menu "Network"
         config MRRC_WIFI_SSID
             string "Wi-Fi SSID"
-            default "REDACTED"
+            default ""
         config MRRC_WIFI_PASSWORD
             string "Wi-Fi password"
-            default "REDACTED"
+            default ""
         config MRRC_WIFI_MAX_RETRY
             int "Wi-Fi connect retries before reboot"
             default 30
@@ -19,7 +19,7 @@ menu "MRRC Handheld"
             default 8888
         config MRRC_SERVER_PASSWORD
             string "MRRC web password (POST /api/auth/login)"
-            default "REDACTED"
+            default ""
 
         config MRRC_TLS
             bool "Use wss:// (TLS)"
@@ -49,6 +49,25 @@ menu "MRRC Handheld"
         config MRRC_UI_FPS
             int "Waterfall refresh rate cap"
             default 12
+        config MRRC_SCOPE_FLOOR
+            int "Spectrum floor (0-255, same as the web UI's Floor slider)"
+            default 71
+            range 0 255
+            help
+                The web client maps the raw scope bins through a fixed
+                floor/ceiling pair.  Matching it here means the handheld shows
+                the same picture as the browser instead of an auto-scaled one.
+        config MRRC_SCOPE_CEIL
+            int "Spectrum ceiling (0-255, same as the web UI's Ceil slider)"
+            default 233
+            range 0 255
+        config MRRC_SCOPE_SPAN
+            int "Spectrum span index when the radio does not report one"
+            default 6
+            range 0 9
+            help
+                0=1k 1=2k 2=5k 3=10k 4=20k 5=50k 6=100k 7=200k 8=500k 9=1M.
+                Index 6 (100 kHz) is what the operator runs on the web UI.
     endmenu
 
     menu "Audio"
