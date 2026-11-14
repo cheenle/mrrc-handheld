@@ -13,10 +13,10 @@ menu "MRRC Handheld"
 
         config MRRC_SERVER_HOST
             string "MRRC server host (IP or name)"
-            default "ba4eg.mrrc.vlsc.net"
+            default "192.168.1.217"
         config MRRC_SERVER_PORT
             int "MRRC server port"
-            default 443
+            default 8888
         config MRRC_SERVER_PASSWORD
             string "MRRC web password (POST /api/auth/login)"
             default "REDACTED"
@@ -27,7 +27,7 @@ menu "MRRC Handheld"
         config MRRC_TLS_INSECURE
             depends on MRRC_TLS
             bool "Skip TLS certificate verification (self-signed cert)"
-            default n
+            default y
     endmenu
 
     menu "Radio UI"

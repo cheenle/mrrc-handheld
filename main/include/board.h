@@ -36,3 +36,8 @@ input_event_t board_input_get_event(void);   /* non-blocking, any task */
 
 /* ── Power ───────────────────────────────────────────────────────── */
 void board_power_status(int *battery_percent, bool *charging);
+
+/* Audio diagnostics */
+size_t board_mic_take(int16_t *dst, size_t samples);
+int32_t board_mic_raw_peak(void);
+void board_mic_dump_once(void);

@@ -13,6 +13,7 @@
 #include "mrrc.h"
 #include "app.h"
 #include "board.h"
+
 #include "board_pins.h"
 
 #include <stdio.h>
@@ -30,7 +31,7 @@
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_websocket_client.h"
-#if defined(CONFIG_MRRC_TLS) && !defined(CONFIG_MRRC_TLS_INSECURE)
+#ifdef CONFIG_MRRC_TLS
 #include "esp_crt_bundle.h"
 #endif
 #include "nvs_flash.h"
@@ -204,6 +205,7 @@ void mrrc_send_txhb(void)
 
 void mrrc_set_freq(int32_t hz)
 {
+    ESP_LOGW(TAG, "TX freq set -> %ld Hz (from a VOL key press)", (long)hz);
     char b[80];
     snprintf(b, sizeof b, "{\"type\":\"set\",\"field\":\"freq\",\"value\":%ld}",
              (long)hz);
@@ -521,10 +523,15 @@ static bool mrrc_login(void)
         .method     = HTTP_METHOD_POST,
         .timeout_ms = 8000,
     };
-#if defined(CONFIG_MRRC_TLS) && !defined(CONFIG_MRRC_TLS_INSECURE)
-    /* Without a CA the esp-tls layer refuses to build a config at all:
-     * "No server verification option set in esp_tls_cfg_t structure". */
+#ifdef CONFIG_MRRC_TLS
+#ifdef CONFIG_MRRC_TLS_INSECURE
+    /* The box serves a self-signed certificate (issuer == subject), so chain
+     * verification cannot succeed.  Requires CONFIG_ESP_TLS_INSECURE +
+     * CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY in sdkconfig. */
+    cfg.skip_cert_common_name_check = true;
+#else
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
 #endif
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli) return false;
@@ -600,13 +607,12 @@ static void ws_start(ws_ctx_t *c)
         .ping_interval_sec    = 15,
         .pingpong_timeout_sec = 25,
     };
-#if !CONFIG_MRRC_TLS
-    /* plain ws:// — nothing to configure */
-#elif !CONFIG_MRRC_TLS_INSECURE
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-#else
-    /* Insecure: no CA provided means esp-tls skips verification. */
+#ifdef CONFIG_MRRC_TLS
+#ifdef CONFIG_MRRC_TLS_INSECURE
     cfg.skip_cert_common_name_check = true;
+#else
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
 #endif
 
     c->handle = esp_websocket_client_init(&cfg);
@@ -695,15 +701,11 @@ static void audio_task(void *arg)
                 /* The server keys the radio (a CAT write) and then reopens its
                  * TX stream, clearing the queue — do not race that. */
                 vTaskDelay(pdMS_TO_TICKS(200));
-                { extern volatile bool g_mic_dump_req; g_mic_dump_req = true; }
+                board_mic_dump_once();
+                { extern void board_mic_dump_once(void); board_mic_dump_once(); }
                 board_mic_read(mic, (size_t)tx_frame);   /* drop pre-key audio */
                 board_mic_read(mic, (size_t)tx_frame);
                 while (rb_get_frame(frame, sizeof frame, 0) > 0) { }  /* drop stale RX */
-            }
-            int32_t lmin, lmax, rmin, rmax;
-            if (board_mic_take_probe(&lmin, &lmax, &rmin, &rmax)) {
-                ESP_LOGI(TAG, "mic probe: Lpk=%ld Rpk=%ld (raw abs)",
-                         (long)lmax, (long)rmax);
             }
             size_t got = board_mic_take(mic, (size_t)tx_frame);
             if (got < (size_t)tx_frame) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
@@ -717,33 +719,13 @@ static void audio_task(void *arg)
                 static int n, acc;
                 if (peak > acc) acc = peak;
                 if (++n >= 50) {       /* ~1 s while keyed */
-                    extern int32_t g_mic_raw_min, g_mic_raw_max;
-                    extern int64_t g_mic_raw_sum;
-                    extern int g_mic_raw_n;
-                    int mean = g_mic_raw_n ? (int)(g_mic_raw_sum / g_mic_raw_n) : 0;
-                    extern int32_t g_mic_raw_head[8];
-                    extern int32_t g_mic_l_min, g_mic_l_max, g_mic_r_min, g_mic_r_max;
-                    extern int32_t g_mic_r_head[4];
                     extern radio_state_t *mrrc_state_ptr(void);
+                    extern int32_t board_mic_raw_peak(void);
                     radio_state_t *rst = mrrc_state_ptr();
-                    ESP_LOGI(TAG, "tx mic peak %d%% pwr=%dW swr=%.1f alc=%d%% "
-                             "txst=%d radio=%d", acc * 100 / 32768,
-                             rst->power_w, (double)rst->swr,
-                             (int)(rst->alc_pct + 0.5f), rst->tx_status,
-                             (int)rst->radio_online);
-                    ESP_LOGI(TAG, "   raw[min=%ld max=%ld mean=%d] head=%08lx %08lx %08lx %08lx",
-                             (long)g_mic_raw_min, (long)g_mic_raw_max, mean,
-                             (unsigned long)g_mic_raw_head[0],
-                             (unsigned long)g_mic_raw_head[1],
-                             (unsigned long)g_mic_raw_head[2],
-                             (unsigned long)g_mic_raw_head[3]);
-                    ESP_LOGI(TAG, "   L[%ld..%ld] R[%ld..%ld] Rhead=%08lx %08lx %08lx %08lx",
-                             (long)g_mic_l_min, (long)g_mic_l_max,
-                             (long)g_mic_r_min, (long)g_mic_r_max,
-                             (unsigned long)g_mic_r_head[0],
-                             (unsigned long)g_mic_r_head[1],
-                             (unsigned long)g_mic_r_head[2],
-                             (unsigned long)g_mic_r_head[3]);
+                    ESP_LOGI(TAG, "tx mic peak %d%% raw %ld pwr=%dW alc=%d%% "
+                             "txst=%d", acc * 100 / 32768,
+                             (long)board_mic_raw_peak(), rst->power_w,
+                             (int)(rst->alc_pct + 0.5f), rst->tx_status);
                     n = 0;
                     acc = 0;
                 }
@@ -777,16 +759,18 @@ static void audio_task(void *arg)
         }
 
         /* ── receive ────────────────────────────────────────────── */
-        {
-            int32_t lmin, lmax, rmin, rmax;
-            if (board_mic_take_probe(&lmin, &lmax, &rmin, &rmax)) {
-                ESP_LOGI(TAG, "mic probe: Lpk=%ld Rpk=%ld (raw abs, 5 s)",
-                         (long)lmax, (long)rmax);
-            }
-        }
         spk_gain = g_app.spk_vol > 0 ? g_app.spk_vol : CONFIG_MRRC_SPK_VOLUME;
-        size_t len = rb_get_frame(frame, sizeof frame, pdMS_TO_TICKS(20));
-        if (len < 2) continue;
+
+        static bool primed;
+        if (!primed) {
+            vTaskDelay(pdMS_TO_TICKS(150));      /* let a jitter backlog build */
+            primed = true;
+        }
+        size_t len = rb_get_frame(frame, sizeof frame, pdMS_TO_TICKS(30));
+        if (len < 2) {
+            primed = false;                      /* underrun: re-prime next time */
+            continue;
+        }
         uint8_t tag = frame[0];
         const uint8_t *payload = frame + 1;
         size_t plen = len - 1;
@@ -936,7 +920,7 @@ void mrrc_net_start(void)
         ESP_LOGE(TAG, "ring buffer allocation failed");
         return;
     }
-    xTaskCreatePinnedToCore(audio_task, "audio", 12288, NULL, 6, NULL, 1);
+    xTaskCreatePinnedToCore(audio_task, "audio", 12288, NULL, 8, NULL, 1);
     /* Above the audio task so the heartbeat survives Opus load. */
     xTaskCreatePinnedToCore(tx_hb_task, "txhb", 4096, NULL, 10, NULL, 0);
     xTaskCreatePinnedToCore(net_task, "net", 8192, NULL, 5, NULL, 0);
