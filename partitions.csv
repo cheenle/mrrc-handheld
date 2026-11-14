@@ -1,0 +1,9 @@
+# MRRC Handheld partition table (16 MB flash)
+#
+# The first two entries mirror the stock xiaozhi layout, so a full-chip restore
+# of ~/esp-backup-20261114-0151 still lands on valid offsets.
+#
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x4000
+phy_init, data, phy,     0xf000,   0x1000
+factory,  app,  factory, 0x10000,  0x600000

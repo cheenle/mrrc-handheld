@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────────────
+# MRRC Handheld — coolkit-xz-02 / xingzhi-cube-1.54tft-wifi (ESP32-S3)
+# ─────────────────────────────────────────────────────────────────────
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash: 16 MB quad
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Custom partition table (keeps NVS at 0x9000 so the stock layout survives)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM: 8 MB octal @ 80 MHz (this board is N16R8)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# CPU / cache
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_UNICORE=n
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Networking headroom: 4 concurrent TLS/WS sockets + HTTP
+CONFIG_LWIP_MAX_SOCKETS=12
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11680
+CONFIG_LWIP_TCP_WND_DEFAULT=11680
+
+# Watchdog: the UI task can block on SPI flush during a spectrum burst
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+
+# USB Serial/JTAG console (this board has no UART bridge)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Log level
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# TLS: four concurrent wss sockets on a 512 KB internal heap.
+# Default 16 KB in/out records x4 would not fit; 4 KB in covers the
+# Let's Encrypt chain and our largest frame is 851 B.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=6144
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# 4 concurrent TLS sockets must not fight over the internal pool:
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_LWIP_IPV6=y
+
+# Espressif certificate bundle lives in flash, not RAM
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+CONFIG_OPUS_PSEUDOSTACK_SIZE=240000
+# CONFIG_OPUS_FLOATING_POINT is not set

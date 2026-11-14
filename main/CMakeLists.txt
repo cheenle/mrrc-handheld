@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "board_display.c"
+        "board_audio.c"
+        "board_input.c"
+        "ui.c"
+        "ui_font.c"
+        "ui_fonts.c"
+        "mrrc_net.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_lcd
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        esp_http_client
+        esp_websocket_client
+        json
+        nvs_flash
+        esp_adc
+        app_update
+)

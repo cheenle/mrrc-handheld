@@ -1,0 +1,94 @@
+menu "MRRC Handheld"
+
+    menu "Network"
+        config MRRC_WIFI_SSID
+            string "Wi-Fi SSID"
+            default "REDACTED"
+        config MRRC_WIFI_PASSWORD
+            string "Wi-Fi password"
+            default "REDACTED"
+        config MRRC_WIFI_MAX_RETRY
+            int "Wi-Fi connect retries before reboot"
+            default 30
+
+        config MRRC_SERVER_HOST
+            string "MRRC server host (IP or name)"
+            default "ba4eg.mrrc.vlsc.net"
+        config MRRC_SERVER_PORT
+            int "MRRC server port"
+            default 443
+        config MRRC_SERVER_PASSWORD
+            string "MRRC web password (POST /api/auth/login)"
+            default "REDACTED"
+
+        config MRRC_TLS
+            bool "Use wss:// (TLS)"
+            default y
+        config MRRC_TLS_INSECURE
+            depends on MRRC_TLS
+            bool "Skip TLS certificate verification (self-signed cert)"
+            default n
+    endmenu
+
+    menu "Radio UI"
+        config MRRC_FREQ_STEP_HZ
+            int "Frequency step per click (Hz)"
+            default 1000
+        config MRRC_AF_STEP
+            int "AF gain step per click (0-255 scale)"
+            default 6
+        config MRRC_FREQ_MIN_HZ
+            int "Tuning lower bound (Hz)"
+            default 100000
+        config MRRC_FREQ_MAX_HZ
+            int "Tuning upper bound (Hz)"
+            default 54000000
+        config MRRC_SPECTRUM_PROFILE
+            string "Spectrum profile declared to the server (high/mid/low)"
+            default "high"
+        config MRRC_UI_FPS
+            int "Waterfall refresh rate cap"
+            default 12
+    endmenu
+
+    menu "Development"
+        config MRRC_DEV_SELFTEST
+            bool "Boot-time self test (auto PTT + framebuffer dumps)"
+            default n
+            help
+                Keys the transmitter ~45 s after boot for 5 s and dumps the
+                framebuffer twice.  Never enable this on a radio left on air.
+    endmenu
+
+    menu "Audio"
+        choice MRRC_AUDIO_CODEC
+            prompt "Uplink codec"
+            default MRRC_AUDIO_OPUS
+            config MRRC_AUDIO_OPUS
+                bool "Opus (recommended)"
+            config MRRC_AUDIO_PCM
+                bool "Raw Int16 PCM (needs 48 kHz mic, LAN only)"
+        endchoice
+        config MRRC_MIC_RATE
+            int "Microphone sample rate"
+            default 16000
+            help
+                The I2S MEMS mic usually supports 16000 or 48000.
+                Opus encodes at this rate and the server's 48 kHz decoder
+                upsamples transparently, so 16000 is safe and cheap.
+                Raw PCM mode ignores this and always uses 48000.
+        config MRRC_TX_BITRATE
+            depends on MRRC_AUDIO_OPUS
+            int "Opus uplink bitrate (bps)"
+            default 20000
+        config MRRC_MIC_GAIN
+            int "Microphone software gain (x100)"
+            default 100
+            range 50 400
+        config MRRC_SPK_VOLUME
+            int "Speaker software volume (x100)"
+            default 100
+            range 0 200
+    endmenu
+
+endmenu
