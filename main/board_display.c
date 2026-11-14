@@ -177,8 +177,13 @@ esp_err_t board_display_init(void)
     { uint8_t d = 0x00; lcd_data(&d, 1); }
     lcd_cmd(0x3A);                       /* COLMOD: 16-bit */
     { uint8_t d = 0x55; lcd_data(&d, 1); }
-    lcd_cmd(0xB0);                       /* RAMCTRL: big endian */
-    { uint8_t d[2] = { 0x00, 0xF0 }; lcd_data(d, 2); }
+    /* RAMCTRL: LITTLE endian (0xF8).  Measured on this panel: with 0xF0 the
+     * controller reads every RGB565 word byte-swapped, so the dark grey bar
+     * 0x18E3 came out as 0xE318 = (230,97,197) — pink.  White text and pure
+     * red/green survived (palindromic), which is why only the fills looked
+     * wrong. */
+    lcd_cmd(0xB0);
+    { uint8_t d[2] = { 0x00, 0xF8 }; lcd_data(d, 2); }
 #if LCD_INVERT
     lcd_cmd(0x21);                       /* INVON */
 #endif

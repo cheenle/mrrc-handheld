@@ -70,9 +70,9 @@ volatile int g_ui_phase;
 #define H_BADGE    15            /* badge lives INSIDE the header now */
 #define Y_FREQ     36            /* em-box top; numerals land ~45..75 */
 #define Y_INFO     80
-#define Y_LBL      95
-#define Y_PLOT    108
-#define H_PLOT     56
+#define Y_LBL      95            /* toast anchor only */
+#define Y_PLOT     96
+#define H_PLOT     70
 #define Y_WF      166
 #define H_WF       40
 #define Y_SCALE   208
@@ -332,20 +332,6 @@ static void fmt_mhz(char *out, size_t n, int32_t hz)
     snprintf(out, n, "%ld.%03ld", (long)(hz / 1000000), (long)((hz / 1000) % 1000));
 }
 
-static void draw_scope_label(const radio_state_t *st)
-{
-    fill(0, Y_LBL, FB_W, Y_PLOT - Y_LBL, C_BG);
-    fill(4, Y_LBL + 1, 96, 10, C_FIELD_D);
-    txt(&font_tiny, 6, Y_LBL + 2, "SPECTRUM SCOPE", C_TEXT);
-    char b[16];
-    int32_t sp = span_hz(st);
-    if (sp >= 1000000) snprintf(b, sizeof b, "%ldM", (long)(sp / 1000000));
-    else snprintf(b, sizeof b, "%ldK", (long)(sp / 1000));
-    int bw = font_width(&font_tiny, b);
-    fill(FB_W - bw - 8, Y_LBL + 1, bw + 4, 10, C_FIELD);
-    txt(&font_tiny, FB_W - bw - 6, Y_LBL + 2, b, C_TEXT);
-}
-
 /* The trace is a *line* plot over the raw floor/ceil mapping, exactly like the
  * web FFT canvas: 30 % EMA smoothing, 2x amplitude boost, 1 px line, cyan.
  * Filling the area under the line (what this used to do) made every noise bump
@@ -542,12 +528,11 @@ static void ui_task(void *arg)
                 bins_to_cols(snap.spec, cols);
                 cols_to_idx(cols, idx);          /* waterfall: floor/ceil, no boost */
                 fft_update(cols);                /* trace: 30 % EMA */
-                draw_scope_label(&st);
                 draw_plot(st.tx_status > 0);
                 draw_waterfall(idx);
                 draw_scale(&st);
                 if (toast[0]) draw_toast(toast);
-                board_display_flush(0, Y_LBL, FB_W, Y_CHIPS - Y_LBL);
+                board_display_flush(0, Y_PLOT, FB_W, Y_CHIPS - Y_PLOT);
             }
         } else if (dirty && toast[0]) {
             draw_toast(toast);

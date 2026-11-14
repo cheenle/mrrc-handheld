@@ -102,7 +102,6 @@ int main(int argc, char **argv)
     draw_frequency(&st);
     draw_info(&st, &a);
     draw_chips(&st, &a, 3300);
-    draw_scope_label(&st);
     draw_plot(tx);
     draw_waterfall(idx);
     draw_scale(&st);
