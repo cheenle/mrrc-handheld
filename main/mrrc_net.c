@@ -656,9 +656,11 @@ static void audio_task(void *arg)
 #if CONFIG_MRRC_AUDIO_PCM
     const int tx_rate = 48000;
 #else
-    const int tx_rate = CONFIG_MRRC_MIC_RATE;
+    const int tx_rate = 48000;      /* encode at 48 kHz: same path as the browser,
+                                     * which is known-good on this server */
 #endif
     const int tx_frame = tx_rate / 50;               /* 20 ms */
+    const int mic_frame = 320;                       /* 20 ms @ 16 kHz from the mic */
     /* Local speaker volume, changed live by the VOL knob (never the radio's
      * AF gain — that one stays a server-side setting). */
     int spk_gain = g_app.spk_vol > 0 ? g_app.spk_vol : CONFIG_MRRC_SPK_VOLUME;
@@ -677,8 +679,8 @@ static void audio_task(void *arg)
         ESP_LOGE(TAG, "opus encoder create failed (%d)", err);
         enc = NULL;
     } else {
-        opus_encoder_ctl(enc, OPUS_SET_BITRATE(CONFIG_MRRC_TX_BITRATE));
-        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(0));   /* core 0 is the bottleneck */
+        opus_encoder_ctl(enc, OPUS_SET_BITRATE(CONFIG_MRRC_TX_BITRATE > 20000 ? CONFIG_MRRC_TX_BITRATE : 24000));
+        opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(3));
         opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
         opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(10));
@@ -701,7 +703,6 @@ static void audio_task(void *arg)
                 /* The server keys the radio (a CAT write) and then reopens its
                  * TX stream, clearing the queue — do not race that. */
                 vTaskDelay(pdMS_TO_TICKS(200));
-                board_mic_dump_once();
                 { extern void board_mic_dump_once(void); board_mic_dump_once(); }
                 board_mic_read(mic, (size_t)tx_frame);   /* drop pre-key audio */
                 board_mic_read(mic, (size_t)tx_frame);

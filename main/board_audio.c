@@ -29,7 +29,8 @@
 
 static const char *TAG = "audio";
 
-static void acoustic_selftest_task(void *arg);
+static void acoustic_sweep_task(void *arg);
+
 
 #define SPK_RATE      48000
 #define MIC_RATE      16000
@@ -44,6 +45,16 @@ static int16_t           s_mic_ring[MIC_RING][MIC_FRAME];
 static volatile uint32_t s_mic_w, s_mic_r;
 static volatile int32_t  s_peak_in;
 static volatile bool     s_dump_req;
+/* TX-chain diagnostics: energy of the input (DC removed), of the HP output
+ * (>300 Hz), of the >2.7 kHz part, and the DC offset of the final output. */
+static double d_e_in, d_e_hp, d_e_hi;
+/* single-frequency DFT accumulator, driven by the acoustic sweep below */
+static volatile float g_probe_freq;
+static volatile double g_probe_re, g_probe_im;
+static float g_probe_phase;
+static double d_sum_out;
+static long   d_n;
+static float  d_dc_slow;
 volatile bool g_mic_loopback = false;   /* DEV: bypass Opus, hear the raw capture */
 static int32_t           s_spk_scratch[1152];
 
@@ -69,28 +80,53 @@ static biquad_t s_hp = { 0.90731f, -1.81462f, 0.90731f, -1.80603f, 0.82327f,
                          0, 0, 0, 0 };                 /* HP 350 Hz, Q=0.707 */
 static biquad_t s_lp = { 0.18670f,  0.37340f, 0.18670f, -0.46294f, 0.20977f,
                          0, 0, 0, 0 };                 /* LP 3 kHz,  Q=0.707 */
+/* extra HP at 2.7 kHz, used ONLY for the band statistics below */
+static biquad_t s_hp27 = { 0.81600f, -1.63200f, 0.81600f, -1.60500f, 0.66500f,
+                          0, 0, 0, 0 };
 
 static float agc_env;
 static float agc_gain = 1.0f;
 
-#define AGC_TARGET      0.12f        /* 12 % of full scale */
-#define AGC_MAX_GAIN    64.0f        /* +36 dB */
-#define AGC_GATE        0.004f       /* ~130 counts; below this hold gain */
+#define AGC_TARGET      0.08f        /* 12 % of full scale */
+#define AGC_MAX_GAIN    16.0f        /* +24 dB: more only amplifies hiss on this unit */
+#define AGC_GATE        0.01f        /* ~330 counts: keep noise off the air */
 
-static int16_t mic_condition(int32_t x_in)
+static int16_t mic_condition(float x)
 {
-    float x = (float)x_in;
-    float y = bq(&s_lp, bq(&s_hp, x));
+    /* No int16 clamp on the way in: this mic swings far past 32767 when
+     * someone speaks close to it, and clamping first made the AGC see
+     * squared-off peaks and pull the level *down* (no modulation at all). */
+    /* slow DC tracker (~6 s) so the input energy excludes the offset */
+    d_dc_slow += (x - d_dc_slow) * 1e-5f;
+    float xac = x - d_dc_slow;
+
+    float hp = bq(&s_hp, xac);       /* > 300 Hz */
+    float hi = bq(&s_hp27, hp);      /* > 2.7 kHz (statistics only) */
+    float y  = bq(&s_lp, hp);        /* < 3 kHz -> SSB band */
+
+    if (g_probe_freq > 0.0f) {
+        float re = cosf(g_probe_phase), im = sinf(g_probe_phase);
+        g_probe_re += (double)xac * re;
+        g_probe_im += (double)xac * im;
+        g_probe_phase += 2.0f * 3.14159265f * g_probe_freq / 16000.0f;
+        if (g_probe_phase > 6.2831853f) g_probe_phase -= 6.2831853f;
+    }
+    d_e_in += (double)xac * xac;
+    d_e_hp += (double)hp * hp;
+    d_e_hi += (double)hi * hi;
 
     float a = y < 0 ? -y : y;
     /* envelope: 5 ms attack, 300 ms release at 16 kHz */
     agc_env += (a - agc_env) * ((a > agc_env) ? 0.0125f : 0.000208f);
 
+    float want;
     if (agc_env > AGC_GATE * 32768.0f) {
-        float want = (AGC_TARGET * 32768.0f) / agc_env;
+        want = (AGC_TARGET * 32768.0f) / agc_env;
         if (want > AGC_MAX_GAIN) want = AGC_MAX_GAIN;
         if (want < 1.0f) want = 1.0f;
         agc_gain += (want - agc_gain) * 0.0156f;         /* ~80 ms */
+    } else {
+        agc_gain += (1.0f - agc_gain) * 0.004f;          /* gate: fade to unity */
     }
 
     float out = y * agc_gain;
@@ -100,6 +136,8 @@ static int16_t mic_condition(int32_t x_in)
     else if (out < -knee) out = -(knee + (-out - knee) * 8700.0f / (-out - knee + 9000.0f));
     if (out > 31744.0f) out = 31744.0f;
     if (out < -31744.0f) out = -31744.0f;
+    d_sum_out += out;
+    d_n++;
     return (int16_t)out;
 }
 
@@ -147,13 +185,11 @@ int32_t board_mic_raw_peak(void)
     return p;
 }
 
-void board_mic_dump_once(void)
-{
-    s_dump_req = true;
-}
+void board_mic_dump_once(void) { }
 
 /* ── statistics ──────────────────────────────────────────────────── */
 static int64_t st_sum_raw, st_sum_ssb, st_n, st_frames;
+static int64_t st_sum_band, st_sum_hi;
 static int32_t st_pk_raw, st_pk_ssb;
 static int64_t st_last_log;
 
@@ -165,8 +201,15 @@ static void mic_stats_tick(void)
 
     int rms_raw = st_n ? (int)sqrt((double)st_sum_raw / st_n) : 0;
     int rms_ssb = st_n ? (int)sqrt((double)st_sum_ssb / st_n) : 0;
-    ESP_LOGI(TAG, "mic: frames=%ld/s rms=%d ssb=%d pk_raw=%ld pk_ssb=%ld",
-             (long)st_frames, rms_raw, rms_ssb, (long)st_pk_raw, (long)st_pk_ssb);
+    int rms_hi  = d_n ? (int)sqrt(d_e_hi / d_n) : 0;
+    int rms_hp  = d_n ? (int)sqrt(d_e_hp / d_n) : 0;
+    int rms_in  = d_n ? (int)sqrt(d_e_in / d_n) : 0;
+    int rms_lo  = (rms_in > rms_hp) ? (int)sqrt((double)rms_in * rms_in - (double)rms_hp * rms_hp) : 0;
+    int rms_mid = (rms_hp > rms_hi) ? (int)sqrt((double)rms_hp * rms_hp - (double)rms_hi * rms_hi) : 0;
+    int dc_out  = d_n ? (int)(d_sum_out / d_n) : 0;
+    d_e_in = d_e_hp = d_e_hi = 0; d_sum_out = 0; d_n = 0;
+    ESP_LOGI(TAG, "txdiag: in=%d out=%d dc_out=%d | <300=%d 300-2.7k=%d >2.7k=%d",
+             rms_in, rms_ssb, dc_out, rms_lo, rms_mid, rms_hi);
     st_sum_raw = st_sum_ssb = st_n = 0;
     st_pk_raw = st_pk_ssb = 0;
     st_frames = 0;
@@ -185,10 +228,6 @@ static void mic_pump_task(void *arg)
     }
 
     int32_t peak = 0;
-    static int16_t acc[16000];
-    static int acc_n;
-    static int32_t acc32[4000];
-    static int acc32_n;
 
     while (1) {
         if (!s_rx) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
@@ -217,35 +256,24 @@ static void mic_pump_task(void *arg)
             /* The mic presents ~20 significant bits left-justified in the
              * 32-bit slot; the factory firmware converts with >>12, and the
              * conditioning chain below expects that int16 scale. */
-            int32_t x = raw[i] >> 12;
-            if (x > 32767) x = 32767;
-            if (x < -32767) x = -32767;
-            int32_t a = x < 0 ? -x : x;
+            float xf = (float)raw[i] * (1.0f / 4096.0f);
+            int32_t a = (int32_t)(xf < 0 ? -xf : xf);
             if (a > peak) peak = a;
             st_sum_raw += (int64_t)a * a;
             if (a > st_pk_raw) st_pk_raw = a;
 
-            int16_t y = mic_condition(x);
-            raw_keep[i] = (int16_t)x;
+            int16_t y = mic_condition(xf);
+            raw_keep[i] = (int16_t)(a > 32767 ? 32767 : a);
             st_sum_ssb += (int64_t)y * y;
             int32_t ay = y < 0 ? -y : y;
             if (ay > st_pk_ssb) st_pk_ssb = ay;
             st_n++;
             dst[i] = y;
 
-            /* keep the raw sample for the periodic dump */
-            raw[i] = x;
         }
         s_peak_in = peak;
         peak = 0;
 
-        if (g_mic_loopback) {
-            static int16_t up[MIC_FRAME * 3];
-            for (int i = 0; i < MIC_FRAME; i++) {
-                up[i * 3] = up[i * 3 + 1] = up[i * 3 + 2] = dst[i];
-            }
-            board_spk_write(up, MIC_FRAME * 3);
-        }
         mic_stats_tick();
 
         if (s_mic_w - s_mic_r >= MIC_RING) s_mic_r++;
@@ -253,25 +281,42 @@ static void mic_pump_task(void *arg)
 
         /* on-demand dump (PTT key-up), never periodic: printing 16k hex values
          * blocks the pump and drops frames */
-        if (s_dump_req) {
-            for (size_t i = 0; i < frames && acc32_n < 4000; i++)
-                acc32[acc32_n++] = raw32[i];
-        }
-        if (acc32_n >= 4000) {
-            acc32_n = 0;
-            s_dump_req = false;
-            printf("\n===MIC32-4000===\n");
-            for (int i = 0; i < 4000; i++) {
-                printf("%08lx%s", (unsigned long)(uint32_t)acc32[i],
-                       (i % 20 == 19) ? "\n" : " ");
-            }
-            printf("===MIC32-END===\n");
-            fflush(stdout);
-        }
     }
 }
 
 /* ── init ────────────────────────────────────────────────────────── */
+/* Play a tone on the speaker and measure how strongly the microphone hears it,
+ * at several frequencies.  Self-contained: needs no phone, no assistant. */
+static void acoustic_sweep_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(8000));
+
+    static const int freqs[] = { 200, 400, 800, 1000, 1600, 2400, 3600 };
+    static int16_t tone[4800];          /* 100 ms @ 48 kHz */
+
+    ESP_LOGW(TAG, "--- microphone frequency response ---");
+    for (size_t i = 0; i < sizeof freqs / sizeof freqs[0]; i++) {
+        float w = 2.0f * 3.14159265f * freqs[i] / 48000.0f;
+        for (int k = 0; k < 4800; k++) {
+            tone[k] = (int16_t)(13000.0f * sinf(w * k));
+        }
+
+        /* settle, then measure while the tone keeps playing */
+        for (int r = 0; r < 3; r++) board_spk_write(tone, 4800);
+        g_probe_re = g_probe_im = 0;
+        g_probe_phase = 0;
+        g_probe_freq = (float)freqs[i];
+        for (int r = 0; r < 6; r++) board_spk_write(tone, 4800);   /* 0.6 s */
+        g_probe_freq = 0;
+
+        double mag = sqrt(g_probe_re * g_probe_re + g_probe_im * g_probe_im)
+                     / (16000.0 * 0.6) * 2.0;                     /* amplitude */
+        ESP_LOGW(TAG, "  %4d Hz -> mic response %8.1f", freqs[i], mag);
+    }
+    ESP_LOGW(TAG, "--- sweep done ---");
+    vTaskDelete(NULL);
+}
+
 esp_err_t board_audio_init(void)
 {
     /* Power hold exactly like the factory firmware: RTC-IO mux, level 1.
@@ -332,7 +377,9 @@ esp_err_t board_audio_init(void)
     ESP_ERROR_CHECK(i2s_channel_enable(s_rx));
 
     xTaskCreatePinnedToCore(mic_pump_task, "mic", 6144, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(acoustic_selftest_task, "acoustic", 4096, NULL, 5, NULL, 1);
+#ifdef CONFIG_MRRC_ACOUSTIC_SWEEP
+    xTaskCreatePinnedToCore(acoustic_sweep_task, "sweep", 4096, NULL, 4, NULL, 1);
+#endif
 
     ESP_LOGI(TAG, "amp I2S0 %d Hz (bclk%d ws%d dout%d), mic I2S1 %d Hz "
              "(bclk%d ws%d din%d)", SPK_RATE, PIN_SPK_BCLK, PIN_SPK_LRCK,
@@ -341,22 +388,3 @@ esp_err_t board_audio_init(void)
 }
 
 
-/* Acoustic self-test: play a 1 kHz tone on the speaker, then dump the raw mic
- * words.  If the mic is picking up sound at all, the dump will contain a 1 kHz
- * peak; if it does not, the microphone is not hearing anything. */
-static void acoustic_selftest_task(void *arg)
-{
-    vTaskDelay(pdMS_TO_TICKS(6000));
-
-    static int16_t tone[4800];
-    for (int i = 0; i < 4800; i++) {
-        tone[i] = (int16_t)(14000 * sinf(2.0f * 3.14159265f * 1000.0f * i / 48000.0f));
-    }
-    for (int r = 0; r < 3; r++) board_spk_write(tone, 4800);   /* 0.3 s of tone */
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    s_dump_req = true;                 /* capture starts now */
-    vTaskDelay(pdMS_TO_TICKS(600));
-    ESP_LOGW(TAG, "acoustic self-test: tone played, raw mic dumped");
-    vTaskDelete(NULL);
-}

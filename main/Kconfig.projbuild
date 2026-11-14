@@ -52,6 +52,14 @@ menu "MRRC Handheld"
     endmenu
 
     menu "Development"
+        config MRRC_ACOUSTIC_SWEEP
+            bool "Boot-time microphone frequency-response sweep"
+            default n
+            help
+                Plays 200 Hz ... 3.6 kHz tones on the speaker and measures the
+                microphone's response at each frequency.  Useful to tell a deaf
+                microphone from a mis-wired one.
+
         config MRRC_DEV_SELFTEST
             bool "Boot-time self test (auto PTT + framebuffer dumps)"
             default n
