@@ -21,6 +21,13 @@ rsync -a --delete \
       --exclude sdkconfig --exclude sdkconfig.old --exclude .git \
       "$HERE/" "$MAC:$REMOTE/"
 
+# sdkconfig is generated, so it is not synced; that also means a new Kconfig
+# option (or a changed default) never reaches the remote build.  Drop the stale
+# file whenever the defaults file is newer than it.
+ssh "$MAC" "cd $REMOTE && { [ ! -f sdkconfig ] || \
+    [ $(grep -c . sdkconfig.defaults) -gt 0 ] && \
+    [ sdkconfig -ot sdkconfig.defaults ]; } && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
+
 echo "== build on mac-mini =="
 ssh "$MAC" "cd $REMOTE && zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
 

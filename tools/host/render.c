@@ -27,7 +27,7 @@ void host_task_stub(void *fn, const char *name, unsigned stack, void *arg,
 static void synth_bins(uint8_t *bins, int frame)
 {
     for (int i = 0; i < MRRC_BINS; i++) {
-        float v = 118.0f + 14.0f * (float)rand() / RAND_MAX;   /* real FT-710 floor */
+        float v = 82.0f + 12.0f * (float)rand() / RAND_MAX;   /* measured on this FT-710 */
         /* carriers */
         int peaks[4] = { 300, 430, 470, 620 };
         int amps[4] = { 90, 140, 70, 110 };
@@ -83,7 +83,8 @@ int main(int argc, char **argv)
         uint8_t bins[MRRC_BINS], cols[FB_W], idx[FB_W];
         synth_bins(bins, f);
         bins_to_cols(bins, cols);
-        cols_normalize(cols, idx);
+        cols_to_idx(cols, idx);
+        fft_update(cols);
         s_wf_head = (s_wf_head + 1) % H_WF;
         memcpy(s_wf + s_wf_head * FB_W, idx, FB_W);
     }
@@ -92,7 +93,8 @@ int main(int argc, char **argv)
     uint8_t bins[MRRC_BINS], cols[FB_W], idx[FB_W];
     synth_bins(bins, 18);
     bins_to_cols(bins, cols);
-    cols_normalize(cols, idx);
+    cols_to_idx(cols, idx);
+    fft_update(cols);
 
     fill(0, 0, FB_W, FB_H, C_BG);
     draw_header(&st, &a);
@@ -101,7 +103,7 @@ int main(int argc, char **argv)
     draw_info(&st, &a);
     draw_chips(&st, &a, 3300);
     draw_scope_label(&st);
-    draw_plot(idx, tx);
+    draw_plot(tx);
     draw_waterfall(idx);
     draw_scale(&st);
 

@@ -11,11 +11,14 @@ BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 # (name, ttf, ptsize, first, last)
+# Bold everywhere: on a 240x240 panel with no subpixel rendering, a regular
+# weight at 11-14 px reads as grey mush.  Bold + the gamma-corrected blend in
+# font_draw() is what makes small Chinese-labelled UI legible.
 SETS = [
-    ("font_big",   BOLD, 40, 0x2E, 0x39),   # . 0-9   -> ~40 px tall
-    ("font_mid",   BOLD, 20, 0x20, 0x7E),   # badges / values
-    ("font_small", REG,  14, 0x20, 0x7E),   # labels
-    ("font_tiny",  REG,  11, 0x20, 0x7E),   # scale ticks
+    ("font_big",   BOLD, 44, 0x2E, 0x39),   # . 0-9   -> the frequency readout
+    ("font_mid",   BOLD, 19, 0x20, 0x7E),   # secondary values
+    ("font_small", BOLD, 15, 0x20, 0x7E),   # every label
+    ("font_tiny",  BOLD, 12, 0x20, 0x7E),   # frequency scale ticks
 ]
 
 

@@ -17,6 +17,8 @@
 #include "board.h"
 #include "ui_font.h"
 
+#include "sdkconfig.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -37,19 +39,30 @@ volatile int g_ui_phase;
 #define FB_W 240
 #define FB_H 240
 
-/* ── palette ─────────────────────────────────────────────────────── */
+/* ── palette ─────────────────────────────────────────────────────────
+ * Frequency readout is white; every other label/chrome is the web UI's amber
+ * accent, so the handheld and the browser look like one product.  The scope
+ * colours are NOT from this table: they come from the "Jet" palette below,
+ * which is a port of static/ft710_ui.js WF_PALETTES.jet. */
 #define C_BG       0x0000
-#define C_CHROME   0x0882       /* navy chrome */
-#define C_CHROME_D 0x0420
-#define C_BADGE    0x1ACD       /* accent blue (LSB badge) */
-#define C_TEXT     0xFFFF
-#define C_DIM      0x9CF3
-#define C_DIMMER   0x4208
-#define C_CYAN     0x07FF
-#define C_AMBER    0xFD20
+#define C_PANEL    0x18E3       /* #1e1e1e dark chrome, as the web settings panel */
+#define C_PANEL_D  0x0861
+/* Top and bottom strips are one bar of ONE colour from edge to edge — the
+ * separate badge/chip boxes read as coloured blobs on this panel. */
+#define C_BAR      0x2965       /* #2a2a2a */
+#define C_ORANGE   0xFD20       /* #ffa500 — web accent, solid */
+/* "Semi-transparent orange": RGB565 has no alpha, so a dim orange over black is
+ * what the eye reads as a translucent field behind the text.  Text on top of it
+ * is white — orange-on-black at 8-10 px was unreadable. */
+#define C_FIELD    0x39E7       /* #3a3a3a — text field background */
+#define C_FIELD_D  0x2104       /* #212121 — dimmer field */
+#define C_ORANGE_D 0xB901       /* bright orange, for small accents only */
+#define C_ORANGE_X 0x4200       /* ~25 % orange, barely-there marks */
+#define C_TEXT     0xFFFF       /* white — every glyph */
 #define C_RED      0xF800
 #define C_GREEN    0x07E0
-#define C_BLUEHI   0x2D7F
+#define C_BLUE     0x3C1E       /* #3b82f6 — the spectrum trace: far more legible
+                                 * against the dark plot than cyan-on-black */
 
 /* ── layout ─────────────────────────────────────────────────────── */
 #define Y_HDR       0
@@ -110,15 +123,31 @@ static void txt_r(const font_t *f, int x_right, int y, const char *s, uint16_t c
 
 /* ── spectrum helpers ────────────────────────────────────────────── */
 
+/* "Jet" — ported verbatim from the web client (static/ft710_ui.js,
+ * WF_PALETTES.jet).  64 steps is what the 6-bit colour index can address.
+ * v=0 is the palette's dark blue floor, not black: a black waterfall reads as
+ * "no data". */
 static void heat_init(void)
 {
     for (int i = 0; i < 64; i++) {
-        float t = i / 63.0f;
+        float v = i / 63.0f;
         int r, g, b;
-        if (t < 0.30f)      { r = 0;   g = 4;   b = 16 + (int)(74 * t / 0.30f); }
-        else if (t < 0.55f) { r = 0;   g = 30 + (int)(200 * (t - 0.30f) / 0.25f); b = 90 + (int)(165 * (t - 0.30f) / 0.25f); }
-        else if (t < 0.80f) { r = 0;   g = 220; b = (int)(255 * (0.80f - t) / 0.25f); }
-        else                { r = (int)(255 * (t - 0.80f) / 0.20f); g = 255; b = 60; }
+        if (v < 0.125f) {
+            float u = v / 0.125f;
+            r = 0; g = 0; b = (int)(128 + u * 127);
+        } else if (v < 0.375f) {
+            float u = (v - 0.125f) / 0.25f;
+            r = 0; g = (int)(u * 255); b = 255;
+        } else if (v < 0.625f) {
+            float u = (v - 0.375f) / 0.25f;
+            r = (int)(u * 255); g = 255; b = (int)(255 * (1 - u));
+        } else if (v < 0.875f) {
+            float u = (v - 0.625f) / 0.25f;
+            r = 255; g = (int)(255 * (1 - u)); b = 0;
+        } else {
+            float u = (v - 0.875f) / 0.125f;
+            r = (int)(255 * (1 - u * 0.5f)); g = 0; b = 0;
+        }
         s_heat[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
     }
 }
@@ -137,48 +166,39 @@ static void bins_to_cols(const uint8_t *bins, uint8_t *cols)
     }
 }
 
-/* The FT-710 scope bins arrive with a tall noise floor (typically 120-150 of
- * 255).  Dividing by the peak alone turns the whole band into one solid block,
- * so subtract a tracked floor first: the trace then sits on the baseline and
- * only real carriers climb. */
-static int s_peak = 96;
-static int s_floor = 40;
+/* The web client maps the raw 0..255 bins through a fixed floor/ceiling from
+ * its scope settings (Floor 71 / Ceil 233 by default, both adjustable there).
+ * Doing the same here means the handheld and the browser show the same picture:
+ * no adaptive AGC on the scope data, which is what made the trace jump when a
+ * single carrier appeared. */
+#define SCOPE_FLOOR CONFIG_MRRC_SCOPE_FLOOR
+#define SCOPE_CEIL  CONFIG_MRRC_SCOPE_CEIL
 
-static void cols_normalize(const uint8_t *cols, uint8_t *idx)
+static void cols_to_idx(const uint8_t *cols, uint8_t *idx)
 {
-    int mx = 1, mn = 255;
+    int range = SCOPE_CEIL - SCOPE_FLOOR;
+    if (range < 1) range = 1;
     for (int x = 0; x < FB_W; x++) {
-        if (cols[x] > mx) mx = cols[x];
-        if (cols[x] < mn) mn = cols[x];
-    }
-
-    if (mx > s_peak) s_peak = mx;                  /* fast attack */
-    else s_peak -= (s_peak - mx) / 5;              /* slow release */
-    if (s_peak < 24) s_peak = 24;
-
-    if (mn > s_floor) s_floor += (mn - s_floor + 3) / 4;   /* rise slowly */
-    else s_floor -= (s_floor - mn) / 4;                    /* fall slowly */
-    if (s_floor < 0) s_floor = 0;
-
-    int range = s_peak - s_floor;
-    if (range < 24) range = 24;
-
-    for (int x = 0; x < FB_W; x++) {
-        /* map to 4..63 so the noise floor stays a visible dark blue instead
-         * of pure black — a black waterfall reads as "no data" */
-        int v = ((int)cols[x] - s_floor) * 59 / range + 4;
-        idx[x] = (uint8_t)(v < 4 ? 4 : (v > 63 ? 63 : v));
+        int v = ((int)cols[x] - SCOPE_FLOOR) * 63 / range;
+        idx[x] = (uint8_t)(v < 0 ? 0 : (v > 63 ? 63 : v));
     }
 }
 
-static uint16_t dim565(uint16_t c, int pct)
+/* Web FFT plot: 30 % new data per frame, then a 2x amplitude boost. */
+#define FFT_ALPHA 0.30f
+#define FFT_BOOST 2.0f
+static float s_fft[FB_W];
+static bool  s_fft_primed;
+
+static void fft_update(const uint8_t *cols)
 {
-    int r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
-    r = r * pct / 100;
-    g = g * pct / 100;
-    b = b * pct / 100;
-    return (uint16_t)((r << 11) | (g << 5) | b);
+    for (int x = 0; x < FB_W; x++) {
+        if (!s_fft_primed) s_fft[x] = (float)cols[x];
+        else s_fft[x] = s_fft[x] * (1.0f - FFT_ALPHA) + (float)cols[x] * FFT_ALPHA;
+    }
+    s_fft_primed = true;
 }
+
 
 /* ── chrome ──────────────────────────────────────────────────────── */
 
@@ -187,38 +207,35 @@ static void draw_wifi_icon(int x, int y, int rssi, uint16_t c)
     int bars = rssi > -55 ? 4 : rssi > -67 ? 3 : rssi > -75 ? 2 : 1;
     for (int i = 0; i < 4; i++) {
         int h = 2 + i * 2;
-        fill(x + i * 3, y + 7 - h, 2, h, i < bars ? c : C_DIMMER);
+        fill(x + i * 3, y + 7 - h, 2, h, i < bars ? c : C_ORANGE_X);
     }
 }
 
 static void draw_header(const radio_state_t *st, const app_shared_t *a)
 {
-    fill(0, Y_HDR, FB_W, H_HDR, C_CHROME);
-    fill(0, Y_HDR + H_HDR - 1, FB_W, 1, C_BADGE);       /* accent rule */
+    /* one bar, one colour, white glyphs — the mode sits on the same fill */
+    fill(0, Y_HDR, FB_W, H_HDR, C_BAR);
+    fill(0, Y_HDR + H_HDR - 1, FB_W, 1, C_ORANGE);       /* accent rule */
 
-    /* mode badge, inside the chrome strip */
     const char *mode = st->mode_name[0] ? st->mode_name : "---";
-    int mw = font_width(&font_mid, mode) + 12;
-    rrect(4, 3, mw, H_BADGE, C_BADGE);
-    txt(&font_mid, 4 + 6, 4, mode, C_TEXT);
+    txt(&font_small, 6, 3, mode, C_TEXT);
 
-    /* right cluster: VFO, battery, wifi — no logo, no band name */
-    int x = FB_W - 4;
-    draw_wifi_icon(x - 13, 7, a->rssi, a->wifi_up ? C_GREEN : C_DIMMER);
-    x -= 18;
+    int x = FB_W - 5;
+    draw_wifi_icon(x - 12, 7, a->rssi, a->wifi_up ? C_GREEN : C_PANEL_D);
+    x -= 17;
 
     if (st->battery_pct >= 0) {
         char b[12];
         snprintf(b, sizeof b, "%d%%", st->battery_pct);
         x -= font_width(&font_small, b);
-        txt(&font_small, x, 4, b, st->charging ? C_GREEN : C_DIM);
-        x -= 6;
+        txt(&font_small, x, 3, b, st->charging ? C_GREEN : C_TEXT);
+        x -= 8;
     }
 
     char vfo[8];
     snprintf(vfo, sizeof vfo, "VFO %c", st->vfo ? st->vfo : 'A');
-    x -= font_width(&font_tiny, vfo);
-    txt(&font_tiny, x, 7, vfo, C_DIM);
+    x -= font_width(&font_small, vfo);
+    txt(&font_small, x, 3, vfo, C_TEXT);
 }
 
 static void draw_frequency(const radio_state_t *st)
@@ -233,6 +250,29 @@ static void draw_frequency(const radio_state_t *st)
     txt(&font_big, (FB_W - font_width(&font_big, b)) / 2, Y_FREQ, b, c);
 }
 
+/* A field behind a run of text: translucent-orange background, white glyphs.
+ * Everything in the info strip is drawn this way so it stays readable in
+ * daylight at 10 px. */
+static void field_txt(const font_t *f, int x, int y, const char *s,
+                      uint16_t fg, uint16_t bg)
+{
+    int w = font_width(f, s);
+    fill(x - 2, y - 1, w + 4, f->ascent >= 12 ? 14 : 12, bg);
+    txt(f, x, y, s, fg);
+}
+
+static void field_txt_c(const font_t *f, int y, const char *s,
+                        uint16_t fg, uint16_t bg)
+{
+    field_txt(f, (FB_W - font_width(f, s)) / 2, y, s, fg, bg);
+}
+
+static void field_txt_r(const font_t *f, int x_right, int y, const char *s,
+                        uint16_t fg, uint16_t bg)
+{
+    field_txt(f, x_right - font_width(f, s), y, s, fg, bg);
+}
+
 static void draw_info(const radio_state_t *st, const app_shared_t *a)
 {
     fill(0, Y_INFO, FB_W, Y_LBL - Y_INFO - 1, C_BG);
@@ -240,11 +280,12 @@ static void draw_info(const radio_state_t *st, const app_shared_t *a)
     char l[16];
     if (st->tx_status > 0) {
         snprintf(l, sizeof l, "SWR %.1f", st->swr);
-        txt(&font_small, 6, Y_INFO, l, st->swr > 2.0f ? C_RED : C_TEXT);
+        field_txt(&font_small, 6, Y_INFO, l, C_TEXT,
+                  st->swr > 2.0f ? C_RED : C_FIELD);
         snprintf(l, sizeof l, "%dW", st->power_w);
-        txt_c(&font_small, Y_INFO, l, C_AMBER);
+        field_txt_c(&font_small, Y_INFO, l, C_TEXT, C_FIELD);
         snprintf(l, sizeof l, "ALC %d%%", (int)(st->alc_pct + 0.5f));
-        txt_r(&font_small, FB_W - 6, Y_INFO, l, C_CYAN);
+        field_txt_r(&font_small, FB_W - 6, Y_INFO, l, C_TEXT, C_FIELD);
         return;
     }
 
@@ -252,23 +293,23 @@ static void draw_info(const radio_state_t *st, const app_shared_t *a)
         char u[16];
         if (st->s_unit[0] == '+') snprintf(u, sizeof u, "S9%s", st->s_unit);
         else snprintf(u, sizeof u, "%s", st->s_unit[0] ? st->s_unit : "-");
-        txt(&font_small, 6, Y_INFO, u, C_AMBER);
+        field_txt(&font_small, 6, Y_INFO, u, C_TEXT, C_FIELD);
     }
 
     if (st->filter_hz > 0) {
         snprintf(l, sizeof l, "FIL %d.%dK", st->filter_hz / 1000,
                  (st->filter_hz % 1000) / 100);
-        txt_c(&font_small, Y_INFO, l, C_DIM);
+        field_txt_c(&font_small, Y_INFO, l, C_TEXT, C_FIELD_D);
     }
 
     char r[16];
     if (a->ui_mode == UI_MODE_VOL) {
         snprintf(r, sizeof r, "SPK %d%%", a->spk_vol);
-        txt_r(&font_small, FB_W - 6, Y_INFO, r, C_CYAN);
+        field_txt_r(&font_small, FB_W - 6, Y_INFO, r, C_TEXT, C_FIELD);
     } else {
         /* the radio's own AF gain — read-only here, it is a server setting */
         snprintf(r, sizeof r, "AF %d", st->af_gain);
-        txt_r(&font_small, FB_W - 6, Y_INFO, r, C_DIM);
+        field_txt_r(&font_small, FB_W - 6, Y_INFO, r, C_TEXT, C_FIELD_D);
     }
 }
 
@@ -281,7 +322,7 @@ static const int32_t k_spans_hz[10] = {
 static int32_t span_hz(const radio_state_t *st)
 {
     int i = st->scope_span;
-    if (i < 0 || i > 9) i = 6;          /* default 100 kHz */
+    if (i < 0 || i > 9) i = CONFIG_MRRC_SCOPE_SPAN;
     return k_spans_hz[i];
 }
 
@@ -294,31 +335,63 @@ static void fmt_mhz(char *out, size_t n, int32_t hz)
 static void draw_scope_label(const radio_state_t *st)
 {
     fill(0, Y_LBL, FB_W, Y_PLOT - Y_LBL, C_BG);
-    txt(&font_tiny, 6, Y_LBL + 1, "SPECTRUM SCOPE", C_DIM);
+    fill(4, Y_LBL + 1, 96, 10, C_FIELD_D);
+    txt(&font_tiny, 6, Y_LBL + 2, "SPECTRUM SCOPE", C_TEXT);
     char b[16];
     int32_t sp = span_hz(st);
     if (sp >= 1000000) snprintf(b, sizeof b, "%ldM", (long)(sp / 1000000));
     else snprintf(b, sizeof b, "%ldK", (long)(sp / 1000));
-    txt_r(&font_tiny, FB_W - 6, Y_LBL + 1, b, C_DIM);
+    int bw = font_width(&font_tiny, b);
+    fill(FB_W - bw - 8, Y_LBL + 1, bw + 4, 10, C_FIELD);
+    txt(&font_tiny, FB_W - bw - 6, Y_LBL + 2, b, C_TEXT);
 }
 
-static void draw_plot(const uint8_t *idx, bool tx)
+/* The trace is a *line* plot over the raw floor/ceil mapping, exactly like the
+ * web FFT canvas: 30 % EMA smoothing, 2x amplitude boost, 1 px line, cyan.
+ * Filling the area under the line (what this used to do) made every noise bump
+ * look like a signal and hid the real shape.  The trace is blue: it is the one
+ * colour that stays legible against both the dark plot and the Jet waterfall. */
+static void draw_plot(bool tx)
 {
+    int range = SCOPE_CEIL - SCOPE_FLOOR;
+    if (range < 1) range = 1;
+    uint16_t tc = tx ? C_RED : C_BLUE;
+
+    /* Wipe the plot area first. */
     for (int x = 0; x < FB_W; x++) {
-        int h = (int)idx[x] * (H_PLOT - 2) / 63;
-        uint16_t c = dim565(s_heat[idx[x]], 55);
-        uint16_t *base = s_fb + (Y_PLOT + H_PLOT - 1) * FB_W + x;
-        for (int i = 0; i < H_PLOT; i++) base[-i * FB_W] = (i < h) ? c : C_BG;
-        if (h > 0) {
-            base[-h * FB_W] = tx ? C_RED : C_TEXT;          /* the trace */
-            if (h > 1) base[-(h - 1) * FB_W] = tx ? C_RED : C_CYAN;
+        uint16_t *col = s_fb + Y_PLOT * FB_W + x;
+        for (int i = 0; i < H_PLOT; i++) col[i * FB_W] = C_BG;
+    }
+
+    /* One continuous line: each column's point is joined to the previous one
+     * with a vertical run, so the trace is a solid stroke rather than a row of
+     * isolated dots.  A second pixel underneath thickens it slightly, which is
+     * what makes it legible on this panel. */
+    int yprev = -1;
+    for (int x = 0; x < FB_W; x++) {
+        float mapped = (s_fft[x] - (float)SCOPE_FLOOR) / (float)range * FFT_BOOST;
+        if (mapped < 0.0f) mapped = 0.0f;
+        if (mapped > 1.0f) mapped = 1.0f;
+        int y = Y_PLOT + (H_PLOT - 1) - (int)(mapped * (H_PLOT - 1));
+
+        if (yprev < 0) {
+            s_fb[y * FB_W + x] = tc;
+            if (y + 1 < Y_PLOT + H_PLOT) s_fb[(y + 1) * FB_W + x] = tc;
+        } else {
+            int a = (y < yprev) ? y : yprev;
+            int b = (y < yprev) ? yprev : y;
+            for (int yy = a; yy <= b; yy++) s_fb[yy * FB_W + x] = tc;
+            if (b + 1 < Y_PLOT + H_PLOT) s_fb[(b + 1) * FB_W + x] = tc;
         }
+        yprev = y;
     }
-    /* centre marker (the FT-710 scope is centre-mode) */
+
+    /* centre marker (the FT-710 runs CENTER mode: VFO == scope centre) */
     for (int y = Y_PLOT; y < Y_PLOT + H_PLOT; y += 4) {
-        s_fb[y * FB_W + FB_W / 2] = C_DIMMER;
+        uint16_t *p = &s_fb[y * FB_W + FB_W / 2];
+        if (*p == C_BG) *p = C_PANEL_D;
     }
-    fill(0, Y_PLOT + H_PLOT, FB_W, 1, C_CHROME_D);
+    fill(0, Y_PLOT + H_PLOT, FB_W, 1, C_PANEL_D);
 }
 
 static void draw_waterfall(const uint8_t *idx)
@@ -341,50 +414,35 @@ static void draw_scale(const radio_state_t *st)
     char b[16];
 
     fmt_mhz(b, sizeof b, st->freq_hz - half);
-    txt(&font_tiny, 4, Y_SCALE, b, C_DIMMER);
+    field_txt(&font_tiny, 4, Y_SCALE, b, C_TEXT, C_FIELD_D);
 
     fmt_mhz(b, sizeof b, st->freq_hz);
-    txt_c(&font_tiny, Y_SCALE, b, C_DIM);
+    field_txt_c(&font_tiny, Y_SCALE, b, C_TEXT, C_FIELD);
 
     fmt_mhz(b, sizeof b, st->freq_hz + half);
-    txt_r(&font_tiny, FB_W - 4, Y_SCALE, b, C_DIMMER);
+    field_txt_r(&font_tiny, FB_W - 4, Y_SCALE, b, C_TEXT, C_FIELD_D);
 }
 
 static void draw_chips(const radio_state_t *st, const app_shared_t *a, int64_t now_ms)
 {
-    fill(0, Y_CHIPS, FB_W, FB_H - Y_CHIPS, C_BG);
+    /* one bar, one colour, left-to-right: mode | TX/RX | link */
+    fill(0, Y_CHIPS, FB_W, FB_H - Y_CHIPS, C_BAR);
 
-    /* 1) tuning mode */
     const char *m = (a->ui_mode == UI_MODE_VOL) ? "VOL" : "FREQ";
-    uint16_t mc = (a->ui_mode == UI_MODE_VOL) ? C_CYAN : C_AMBER;
-    int w = font_width(&font_small, m) + 14;
-    rrect(4, Y_CHIPS, w, H_CHIPS, C_CHROME);
-    txt(&font_small, 4 + 7, Y_CHIPS + 2, m, mc);
+    txt(&font_small, 6, Y_CHIPS, m, C_TEXT);
 
-    /* 2) TX / RX */
     char t[16];
-    uint16_t tc = C_GREEN;
     if (st->tx_status > 0) {
-        int s = (int)((now_ms - a->ptt_since_ms) / 1000);
-        if (s < 0) s = 0;
-        snprintf(t, sizeof t, "TX %d", s);
-        tc = C_RED;
+        int sec = (int)((now_ms - a->ptt_since_ms) / 1000);
+        if (sec < 0) sec = 0;
+        snprintf(t, sizeof t, "TX %d", sec);
+        txt_c(&font_small, Y_CHIPS, t, C_RED);
     } else {
-        snprintf(t, sizeof t, "%s", "RX");
+        txt_c(&font_small, Y_CHIPS, "RX", C_TEXT);
     }
-    int tw = font_width(&font_small, t) + 14;
-    rrect((FB_W - tw) / 2, Y_CHIPS, tw, H_CHIPS, st->tx_status > 0 ? C_RED : C_CHROME);
-    txt(&font_small, (FB_W - tw) / 2 + 7, Y_CHIPS + 2, t,
-        st->tx_status > 0 ? C_TEXT : C_GREEN);
 
-    /* 3) link */
-    char l[12];
-    snprintf(l, sizeof l, "%s", a->ctrl_up ? "LINK" : "noSRV");
-    int lw = font_width(&font_small, l) + 14;
-    rrect(FB_W - lw - 4, Y_CHIPS, lw, H_CHIPS, C_CHROME);
-    txt(&font_small, FB_W - lw + 3, Y_CHIPS + 2, l,
-        a->ctrl_up ? C_GREEN : C_RED);
-    (void)tc;
+    const char *l = a->ctrl_up ? "LINK" : "noSRV";
+    txt_r(&font_small, FB_W - 6, Y_CHIPS, l, a->ctrl_up ? C_TEXT : C_RED);
 }
 
 /* ── toast ───────────────────────────────────────────────────────── */
@@ -482,9 +540,10 @@ static void ui_task(void *arg)
                 last_frame_us = now_us;
                 uint8_t cols[FB_W], idx[FB_W];
                 bins_to_cols(snap.spec, cols);
-                cols_normalize(cols, idx);
+                cols_to_idx(cols, idx);          /* waterfall: floor/ceil, no boost */
+                fft_update(cols);                /* trace: 30 % EMA */
                 draw_scope_label(&st);
-                draw_plot(idx, st.tx_status > 0);
+                draw_plot(st.tx_status > 0);
                 draw_waterfall(idx);
                 draw_scale(&st);
                 if (toast[0]) draw_toast(toast);
