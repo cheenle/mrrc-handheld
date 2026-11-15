@@ -119,6 +119,19 @@ idf.py build            # app 1.26 MB / 分区 6 MB（80% 余量）
 * `esphome/micro-opus` — 标准 `opus.h` API（编码 + 解码），带 Xtensa DSP 优化
 * `espressif/esp_websocket_client` — IDF 5.4 已移出核心，需显式声明
 
+### 下载代理
+
+`proxy.env` 里配了本网络的下载代理（`MRRC_HTTP_PROXY`，实测比直连快 **10~20 倍**：
+同一个 GitHub release 直连 66 s、走代理 3.1 s）。三个地方自动生效：
+
+```bash
+set -a; . ./proxy.env; set +a     # 自己的 shell
+./tools/fetch.sh <url> [out]      # 单文件下载（带回退到直连）
+./tools/build_on_mac.sh           # 构建（本地 + 远端都 export）
+```
+
+`MRRC_NO_PROXY` 让 `192.168.0.0/16`、`*.vlsc.net` 直连，避免把局域网流量塞进代理。
+
 ## 5. 烧录 / 回滚
 
 ```bash

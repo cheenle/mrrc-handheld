@@ -9,6 +9,20 @@
 set -euo pipefail
 
 MAC=${MAC:-cheenle@192.168.1.228}
+HERE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Download proxy (see proxy.env).  The component manager fetches dozens of
+# components on the build host; through the LAN proxy that is ~10x faster.
+PROXY_ENV=""
+if [ -f "$HERE_ROOT/proxy.env" ]; then
+    set -a; . "$HERE_ROOT/proxy.env"; set +a
+    if [ -n "${MRRC_HTTP_PROXY:-}" ]; then
+        export http_proxy="$MRRC_HTTP_PROXY" https_proxy="$MRRC_HTTP_PROXY" \
+               HTTP_PROXY="$MRRC_HTTP_PROXY" HTTPS_PROXY="$MRRC_HTTP_PROXY"
+        export no_proxy="${MRRC_NO_PROXY:-}" NO_PROXY="${MRRC_NO_PROXY:-}"
+        PROXY_ENV="http_proxy=$MRRC_HTTP_PROXY https_proxy=$MRRC_HTTP_PROXY no_proxy='${MRRC_NO_PROXY:-}'"
+        echo "== proxy: $MRRC_HTTP_PROXY =="
+    fi
+fi
 # NOTE: must stay a *relative* path — an unquoted ~ is expanded locally and
 # becomes /home/... which macOS refuses to create (autofs owns /home).
 REMOTE=dev/mrrc-handheld
@@ -29,7 +43,7 @@ ssh "$MAC" "cd $REMOTE && { [ ! -f sdkconfig ] || \
     [ sdkconfig -ot sdkconfig.defaults ]; } && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
 
 echo "== build on mac-mini =="
-ssh "$MAC" "cd $REMOTE && zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
+ssh "$MAC" "cd $REMOTE && $PROXY_ENV zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
 
 echo "== fetch artefacts =="
 mkdir -p "$HERE/build-mac"

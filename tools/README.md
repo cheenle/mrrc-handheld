@@ -10,6 +10,7 @@ Host-side helpers.  None of this is part of the firmware image.
 | `console.py` | opens the USB-Serial-JTAG console and survives the CDC re-enumeration after a reset (`python3 tools/console.py 120`). |
 | `probe_ptt.py` | keys/unkeys the radio through the **server** (no radio hardware involved) and prints the state updates, so "device → server" and "server → radio" can be told apart. |
 | `probe_ptt2.py` | same, but watches the TX meters (`power_meter`, `swr_meter`, `alc_meter`, `id_meter`) plus `active_freq`/`mode`, i.e. answers "did the radio actually transmit". |
+| `fetch.sh` | download one file through `proxy.env`'s proxy, falling back to direct. Same release asset: 66 s direct vs 3.1 s proxied. |
 | `probe_mrrc_ws.py` | read-only probe of all four sockets (login, `/WSradio`, `/WSspectrum`, `/WSaudioRX`) — the reference for what the firmware must send. |
 
 `probe_*` take the server host as an optional first argument (default
