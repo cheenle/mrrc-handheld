@@ -101,6 +101,7 @@ int main(int argc, char **argv)
     fill(0, Y_FREQ, FB_W, Y_INFO - Y_FREQ, C_BG);
     draw_frequency(&st);
     draw_info(&st, &a);
+    draw_smeter(&st);
     draw_chips(&st, &a, 3300);
     draw_plot(tx);
     draw_waterfall(idx);

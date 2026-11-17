@@ -69,13 +69,14 @@ volatile int g_ui_phase;
 #define H_HDR      22
 #define H_BADGE    15            /* badge lives INSIDE the header now */
 #define Y_FREQ     36            /* em-box top; numerals land ~45..75 */
-#define Y_INFO     80
-#define Y_LBL      95            /* toast anchor only */
-#define Y_PLOT     96
-#define H_PLOT     70
-#define Y_WF      166
+#define Y_INFO     80            /* band + FIL + AF + SPAN, one row */
+#define Y_SMETER   94            /* the S-meter lives alone down here */
+#define Y_LBL      Y_SMETER      /* toast anchor: overlays the meter row */
+#define Y_PLOT     105
+#define H_PLOT     58
+#define Y_WF      163
 #define H_WF       40
-#define Y_SCALE   208
+#define Y_SCALE   205
 #define Y_CHIPS   222
 #define H_CHIPS    16
 
@@ -273,11 +274,14 @@ static void field_txt_r(const font_t *f, int x_right, int y, const char *s,
     field_txt(f, x_right - font_width(f, s), y, s, fg, bg);
 }
 
+/* span table + span_hz() live further down with the scope helpers */
+static int32_t span_hz(const radio_state_t *st);
+
 static void draw_info(const radio_state_t *st, const app_shared_t *a)
 {
-    fill(0, Y_INFO, FB_W, Y_LBL - Y_INFO - 1, C_BG);
+    fill(0, Y_INFO, FB_W, Y_SMETER - Y_INFO, C_BG);
 
-    char l[16];
+    char l[20];
     if (st->tx_status > 0) {
         snprintf(l, sizeof l, "SWR %.1f", st->swr);
         field_txt(&font_small, 6, Y_INFO, l, C_TEXT,
@@ -289,28 +293,62 @@ static void draw_info(const radio_state_t *st, const app_shared_t *a)
         return;
     }
 
-    {
-        char u[16];
-        if (st->s_unit[0] == '+') snprintf(u, sizeof u, "S9%s", st->s_unit);
-        else snprintf(u, sizeof u, "%s", st->s_unit[0] ? st->s_unit : "-");
-        field_txt(&font_small, 6, Y_INFO, u, C_TEXT, C_FIELD);
-    }
+    /* one row for the radio's identity: BAND | FIL | AF/SPK | SPAN.
+     * small band + tiny fields is the only combination that fits all four
+     * in 240 px at 255-value AF; in VOL mode SPK replaces FIL (the encoder's
+     * live feedback matters more than the filter there). */
+    int x = 4;
+    const char *band = st->band_name[0] ? st->band_name : "--";
+    field_txt(&font_small, x, Y_INFO, band, C_TEXT, C_FIELD);
+    x += font_width(&font_small, band) + 6;
 
-    if (st->filter_hz > 0) {
-        snprintf(l, sizeof l, "FIL %d.%dK", st->filter_hz / 1000,
-                 (st->filter_hz % 1000) / 100);
-        field_txt_c(&font_small, Y_INFO, l, C_TEXT, C_FIELD_D);
-    }
-
-    char r[16];
+    char r[20];
     if (a->ui_mode == UI_MODE_VOL) {
+        /* the handheld's own speaker volume (encoder shortcut) */
         snprintf(r, sizeof r, "SPK %d%%", a->spk_vol);
-        field_txt_r(&font_small, FB_W - 6, Y_INFO, r, C_TEXT, C_FIELD);
     } else {
+        if (st->filter_hz > 0) {
+            snprintf(r, sizeof r, "FIL %d.%dK", st->filter_hz / 1000,
+                     (st->filter_hz % 1000) / 100);
+            field_txt(&font_tiny, x, Y_INFO + 2, r, C_TEXT, C_FIELD_D);
+            x += font_width(&font_tiny, r) + 5;
+        }
         /* the radio's own AF gain — read-only here, it is a server setting */
         snprintf(r, sizeof r, "AF %d", st->af_gain);
-        field_txt_r(&font_small, FB_W - 6, Y_INFO, r, C_TEXT, C_FIELD_D);
     }
+    field_txt(&font_tiny, x, Y_INFO + 2, r, C_TEXT, C_FIELD);
+
+    int32_t sp = span_hz(st);
+    if (sp >= 1000000) snprintf(l, sizeof l, "SPAN %ldM", (long)(sp / 1000000));
+    else snprintf(l, sizeof l, "SPAN %ldK", (long)(sp / 1000));
+    field_txt_r(&font_tiny, FB_W - 4, Y_INFO + 2, l, C_TEXT, C_FIELD_D);
+}
+
+/* S-meter gets its own row: unit label plus a 9-segment bar.  The FT-710
+ * reports s_meter raw 0..255, and S9 sits at about 200 on receive. */
+static void draw_smeter(const radio_state_t *st)
+{
+    fill(0, Y_SMETER, FB_W, Y_PLOT - Y_SMETER, C_BG);
+
+    char u[16];
+    if (st->s_unit[0] == '+') snprintf(u, sizeof u, "S9%s", st->s_unit);
+    else snprintf(u, sizeof u, "%s", st->s_unit[0] ? st->s_unit : "-");
+    txt(&font_small, 6, Y_SMETER, u, C_TEXT);
+
+    int x0 = 8 + font_width(&font_small, u);
+    int w  = FB_W - 6 - x0;
+    int h  = Y_PLOT - Y_SMETER - 3;
+    fill(x0, Y_SMETER, w, h, C_FIELD);                  /* the track */
+
+    int v = st->s_meter;
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    int f = v * w / 255;
+    uint16_t col = st->tx_status > 0 ? C_RED : (v > 230 ? C_ORANGE : C_GREEN);
+    fill(x0 + 1, Y_SMETER + 1, f > 0 ? f - 1 : 0, h - 2, col);
+
+    for (int i = 1; i < 9; i++)                         /* S1..S9 ticks */
+        fill(x0 + w * i / 9, Y_SMETER, 1, h, C_PANEL_D);
 }
 
 /* ── scope ───────────────────────────────────────────────────────── */
@@ -489,8 +527,9 @@ static void ui_task(void *arg)
             fill(0, Y_FREQ, FB_W, Y_INFO - Y_FREQ, C_BG);
             draw_frequency(&st);
             draw_info(&st, &snap);
+            draw_smeter(&st);
             draw_chips(&st, &snap, now_ms);
-            board_display_flush(0, 0, FB_W, Y_LBL);
+            board_display_flush(0, 0, FB_W, Y_PLOT);
             board_display_flush(0, Y_CHIPS, FB_W, FB_H - Y_CHIPS);
             dirty = true;
         } else if (snap.meter_seq != last_meter && now_us - last_meter_us >= 60000) {
@@ -498,7 +537,8 @@ static void ui_task(void *arg)
             last_meter_us = now_us;
             st = snap.st;          /* the meter lives in the fresh snapshot */
             draw_info(&st, &snap);
-            board_display_flush(0, Y_INFO, FB_W, Y_LBL - Y_INFO);
+            draw_smeter(&st);
+            board_display_flush(0, Y_INFO, FB_W, Y_PLOT - Y_INFO);
         } else if (st.tx_status > 0 && now_ms - last_tx_redraw_ms >= 1000) {
             last_tx_redraw_ms = now_ms;
             draw_chips(&st, &snap, now_ms);
