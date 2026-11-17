@@ -32,15 +32,13 @@ PORT=${MRRC_PORT:-$(ls /dev/ttyACM* 2>/dev/null | head -1)}
 echo "== sync source =="
 rsync -a --delete \
       --exclude build --exclude build-mac --exclude managed_components \
-      --exclude sdkconfig --exclude sdkconfig.old --exclude .git \
+      --exclude sdkconfig.old --exclude .git \
       "$HERE/" "$MAC:$REMOTE/"
 
-# sdkconfig is generated, so it is not synced; that also means a new Kconfig
-# option (or a changed default) never reaches the remote build.  Drop the stale
-# file whenever the defaults file is newer than it.
-ssh "$MAC" "cd $REMOTE && { [ ! -f sdkconfig ] || \
-    [ $(grep -c . sdkconfig.defaults) -gt 0 ] && \
-    [ sdkconfig -ot sdkconfig.defaults ]; } && rm -f sdkconfig sdkconfig.old || true" >/dev/null 2>&1
+# sdkconfig IS synced: it is gitignored and holds the real Wi-Fi/server
+# credentials, which deliberately do NOT live in the committed Kconfig
+# defaults.  Regenerating it on the build host would silently strip
+# credentials from the firmware (it happened — empty SSID build).
 
 echo "== build on mac-mini =="
 ssh "$MAC" "cd $REMOTE && $PROXY_ENV zsh -c '. ~/esp-idf/export.sh >/dev/null 2>&1; idf.py build'" 2>&1 | tail -20
