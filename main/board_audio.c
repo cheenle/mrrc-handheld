@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -35,10 +36,13 @@ static const char *TAG = "audio";
 static i2s_chan_handle_t s_tx;       /* I2S0 speaker */
 static i2s_chan_handle_t s_rx;       /* I2S1 microphone */
 
-static int16_t           s_mic_ring[MIC_RING][MIC_FRAME];
+/* The ring + scratch are plain app buffers (the I2S DMA buffers live in the
+ * driver's own internal-RAM descriptors), so they can live in PSRAM and stop
+ * eating the scarcest resource.  aligned(4) is required by .ext_ram.bss. */
+static EXT_RAM_BSS_ATTR int16_t  s_mic_ring[MIC_RING][MIC_FRAME] __attribute__((aligned(4)));
 static volatile uint32_t s_mic_w, s_mic_r;
 static volatile int32_t  s_peak_in;
-static int32_t           s_spk_scratch[1152];
+static EXT_RAM_BSS_ATTR int32_t  s_spk_scratch[1152] __attribute__((aligned(4)));
 
 /* ── speaker ─────────────────────────────────────────────────────── */
 size_t board_spk_write(const int16_t *src, size_t samples)
@@ -192,7 +196,7 @@ esp_err_t board_audio_init(void)
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_rx, &rx_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(s_rx));
 
-    xTaskCreatePinnedToCore(mic_pump_task, "mic", 6144, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(mic_pump_task, "mic", 4096, NULL, 5, NULL, 1);
     ESP_LOGI(TAG, "amp I2S0 %d Hz (bclk%d ws%d dout%d), mic I2S1 %d Hz "
              "(bclk%d ws%d din%d)", SPK_RATE, PIN_SPK_BCLK, PIN_SPK_LRCK,
              PIN_SPK_DOUT, MIC_RATE, PIN_MIC_SCK, PIN_MIC_WS, PIN_MIC_DIN);

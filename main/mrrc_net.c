@@ -25,6 +25,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -723,10 +724,12 @@ static int s16_apply_gain(int16_t s, int gain_x100)
  */
 static void audio_task(void *arg)
 {
-    static uint8_t frame[FRAME_MAX];
-    static int16_t pcm[5760];
-    static int16_t mic[1152];
-    static uint8_t out[1600];
+    /* Big scratch buffers: PSRAM (internal RAM is the scarce resource here;
+     * octal PSRAM at 80 MHz has ~50x the bandwidth this path needs). */
+    static EXT_RAM_BSS_ATTR uint8_t frame[FRAME_MAX] __attribute__((aligned(4)));
+    static EXT_RAM_BSS_ATTR int16_t pcm[5760] __attribute__((aligned(4)));
+    static EXT_RAM_BSS_ATTR int16_t mic[1152] __attribute__((aligned(4)));
+    static EXT_RAM_BSS_ATTR uint8_t out[1600] __attribute__((aligned(4)));
 
 #if CONFIG_MRRC_AUDIO_PCM
     const int tx_rate = 48000;
@@ -736,7 +739,7 @@ static void audio_task(void *arg)
     const int tx_frame = tx_rate / 50;               /* 20 ms read chunk */
     const int mic_frame = 320;                       /* 20 ms @ 16 kHz from the mic */
     const int enc_frame = tx_rate * 60 / 1000;       /* 60 ms = 960 samples, as factory */
-    static int16_t encbuf[960];
+    static EXT_RAM_BSS_ATTR int16_t encbuf[960] __attribute__((aligned(4)));
     static int encfill;
     /* Local speaker volume, changed live by the VOL knob (never the radio's
      * AF gain — that one stays a server-side setting). */
@@ -903,6 +906,7 @@ static void net_task(void *arg)
     while (1) {
         int64_t now = esp_timer_get_time() / 1000;
 
+
         g_app.wifi_up = s_wifi_up;
         g_app.ctrl_up = s_ctrl.up;
 
@@ -1033,10 +1037,10 @@ void mrrc_net_start(void)
         ESP_LOGE(TAG, "ring buffer allocation failed");
         return;
     }
-    xTaskCreatePinnedToCore(audio_task, "audio", 12288, NULL, 8, NULL, 1);
+    xTaskCreatePinnedToCore(audio_task, "audio", 10240, NULL, 8, NULL, 1);
     /* Above the audio task so the heartbeat survives Opus load. */
-    xTaskCreatePinnedToCore(tx_hb_task, "txhb", 4096, NULL, 10, NULL, 0);
-    xTaskCreatePinnedToCore(net_task, "net", 8192, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(tx_hb_task, "txhb", 3072, NULL, 10, NULL, 0);
+    xTaskCreatePinnedToCore(net_task, "net", 6144, NULL, 5, NULL, 0);
     ESP_LOGI(TAG, "server %s:%d, mic %d Hz, opus %s",
              CONFIG_MRRC_SERVER_HOST, CONFIG_MRRC_SERVER_PORT,
              CONFIG_MRRC_MIC_RATE,
