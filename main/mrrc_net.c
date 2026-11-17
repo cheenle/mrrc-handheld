@@ -432,6 +432,8 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id,
 
 /* ── Wi-Fi ───────────────────────────────────────────────────────── */
 
+static esp_netif_t *s_sta_netif;
+
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
                                void *data)
 {
@@ -452,6 +454,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&ev->ip_info.ip));
         s_wifi_up = true;
         s_wifi_retry = 0;
+        /* IPv6: the production server is AAAA-only, so the device must get a
+         * global v6 address or nothing connects.  Creating the link-local is
+         * what starts RS/RA exchange; SLAAC (CONFIG_LWIP_IPV6_AUTOCONFIG)
+         * then derives the global address from the advertised prefix. */
+        if (s_sta_netif) esp_netif_create_ip6_linklocal(s_sta_netif);
+    } else if (base == IP_EVENT && id == IP_EVENT_GOT_IP6) {
+        ip_event_got_ip6_t *ev = (ip_event_got_ip6_t *)data;
+        ESP_LOGI(TAG, "got ip6 " IPV6STR " (idx %d)",
+                 IPV62STR(ev->ip6_info.ip), ev->ip_index);
     }
 }
 
@@ -464,7 +475,7 @@ static void wifi_start(void)
     }
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -472,6 +483,8 @@ static void wifi_start(void)
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_GOT_IP6, &wifi_event_handler, NULL, NULL));
 
     wifi_config_t wc = {0};
     snprintf((char *)wc.sta.ssid, sizeof wc.sta.ssid, "%s", CONFIG_MRRC_WIFI_SSID);

@@ -58,6 +58,11 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 # 4 concurrent TLS sockets must not fight over the internal pool:
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_LWIP_IPV6=y
+# IPv6 must actually WORK: the production server (w103d.vlsc.net) is AAAA-only,
+# so without SLAAC the device has no global v6 address and DNS returns nothing.
+# RDNSS copies the v6 DNS servers advertised in Router Advertisements too.
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_IPV6_RDNSS_MAX_DNS_SERVERS=2
 
 # Espressif certificate bundle lives in flash, not RAM
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
