@@ -434,24 +434,106 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t id,
 
 static esp_netif_t *s_sta_netif;
 
+/*
+ * Multi-SSID: IDF 5.x has no driver-level SSID list any more (wifi_config_t
+ * carries exactly one), so the choice is made here: every connect attempt is
+ * preceded by an all-channel scan and binds the SSID with the best RSSI.
+ * While associated, a re-evaluation runs only when the link is weak
+ * (MRRC_SSID_WEAK) and at most once per MRRC_SSID_EVAL_MS; the candidate
+ * must beat the live AP by MRRC_SSID_MARGIN dB before we tear down and
+ * re-home, so two near-equal networks can never oscillate the radio.
+ */
+#define MRRC_SSID_EVAL_MS  60000
+#define MRRC_SSID_MARGIN   8
+#define MRRC_SSID_WEAK     (-68)
+#define MRRC_SSID_MAX      2
+
+static char s_ssid_tab[MRRC_SSID_MAX][33];
+static char s_pass_tab[MRRC_SSID_MAX][65];
+static int  s_ssid_n;
+static int  s_ssid_cur = -1;
+static volatile bool s_want_connect;
+static volatile int  s_force_idx = -1;   /* hand-picked target for next connect */
+
+static void ssid_table_init(void)
+{
+    s_ssid_n = 0;
+    if (CONFIG_MRRC_WIFI_SSID[0]) {
+        snprintf(s_ssid_tab[0], sizeof s_ssid_tab[0], "%s", CONFIG_MRRC_WIFI_SSID);
+        snprintf(s_pass_tab[0], sizeof s_pass_tab[0], "%s", CONFIG_MRRC_WIFI_PASSWORD);
+        s_ssid_n = 1;
+    }
+    if (s_ssid_n < MRRC_SSID_MAX && CONFIG_MRRC_WIFI_SSID2[0]) {
+        snprintf(s_ssid_tab[s_ssid_n], sizeof s_ssid_tab[0],
+                 "%s", CONFIG_MRRC_WIFI_SSID2);
+        /* an empty secondary password means "same as primary" */
+        snprintf(s_pass_tab[s_ssid_n], sizeof s_pass_tab[0], "%s",
+                 CONFIG_MRRC_WIFI_PASSWORD2[0] ? CONFIG_MRRC_WIFI_PASSWORD2
+                                               : CONFIG_MRRC_WIFI_PASSWORD);
+        s_ssid_n++;
+    }
+}
+
+static bool wifi_apply(int idx)
+{
+    if (idx < 0 || idx >= s_ssid_n) return false;
+    wifi_config_t wc = {0};
+    snprintf((char *)wc.sta.ssid, sizeof wc.sta.ssid, "%s", s_ssid_tab[idx]);
+    snprintf((char *)wc.sta.password, sizeof wc.sta.password, "%s", s_pass_tab[idx]);
+    wc.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    wc.sta.pmf_cfg.capable = true;
+    if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK) return false;
+    s_ssid_cur = idx;
+    ESP_LOGW(TAG, "wifi target -> %s", s_ssid_tab[idx]);
+    return true;
+}
+
+/* Blocking all-channel scan (runs on net_task, never in event context).
+ * Returns the configured SSID index with the strongest signal. */
+static bool wifi_scan_best(int *out_idx, int *out_rssi)
+{
+    if (s_ssid_n < 2) return false;              /* nothing to choose between */
+    wifi_scan_config_t sc = { .scan_type = WIFI_SCAN_TYPE_ACTIVE };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return false;
+
+    uint16_t n = 12;
+    wifi_ap_record_t recs[12];
+    if (esp_wifi_scan_get_ap_records(&n, recs) != ESP_OK) return false;
+
+    int bi = -1, br = -1000;
+    for (int k = 0; k < n; k++) {
+        for (int i = 0; i < s_ssid_n; i++) {
+            if ((int)recs[k].rssi > br &&
+                strcmp((char *)recs[k].ssid, s_ssid_tab[i]) == 0) {
+                bi = i;
+                br = (int)recs[k].rssi;
+            }
+        }
+    }
+    if (bi < 0) return false;   /* neither visible; caller keeps current target */
+    *out_idx = bi;
+    *out_rssi = br;
+    return true;
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id,
                                void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        s_want_connect = true;      /* net_task scans, applies, connects */
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_wifi_up = false;
-        ESP_LOGW(TAG, "wifi disconnected");
         if (++s_wifi_retry < CONFIG_MRRC_WIFI_MAX_RETRY) {
             ESP_LOGW(TAG, "wifi disconnected, retry %d", s_wifi_retry);
-            esp_wifi_connect();
+            s_want_connect = true;  /* next attempt re-scans both SSIDs */
         } else {
             ESP_LOGE(TAG, "wifi gave up, rebooting");
             esp_restart();
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "got ip " IPSTR " via %s", IP2STR(&ev->ip_info.ip),
+                 s_ssid_cur >= 0 ? s_ssid_tab[s_ssid_cur] : "?");
         s_wifi_up = true;
         s_wifi_retry = 0;
         /* IPv6: the production server is AAAA-only, so the device must get a
@@ -486,18 +568,13 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_GOT_IP6, &wifi_event_handler, NULL, NULL));
 
-    wifi_config_t wc = {0};
-    snprintf((char *)wc.sta.ssid, sizeof wc.sta.ssid, "%s", CONFIG_MRRC_WIFI_SSID);
-    snprintf((char *)wc.sta.password, sizeof wc.sta.password, "%s",
-             CONFIG_MRRC_WIFI_PASSWORD);
-    wc.sta.threshold.authmode = WIFI_AUTH_OPEN;
-    wc.sta.pmf_cfg.capable = true;
-
+    ssid_table_init();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
+    wifi_apply(0);                      /* provisional; scan may overrule */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "wifi STA -> %s", CONFIG_MRRC_WIFI_SSID);
+    ESP_LOGI(TAG, "wifi candidates: %s%s%s", s_ssid_tab[0],
+             s_ssid_n > 1 ? " + " : "", s_ssid_n > 1 ? s_ssid_tab[1] : "");
 }
 
 /* ── login ───────────────────────────────────────────────────────── */
@@ -818,6 +895,7 @@ static void net_task(void *arg)
 {
     wifi_start();
     int64_t last_rssi_ms = 0;
+    int64_t last_ssid_eval_ms = 0;
     int64_t ctrl_down_since = 0;
     uint32_t last_ui_hb = 0;
     int64_t ui_stall_ms = 0;
@@ -846,11 +924,43 @@ static void net_task(void *arg)
             ui_stall_ms = 0;
         }
 
+        /* connect attempts run here, not in the event handler: choosing the
+         * SSID needs a blocking scan, which must never run in event context. */
+        if (s_want_connect) {
+            s_want_connect = false;
+            int idx = s_force_idx;
+            s_force_idx = -1;
+            if (idx < 0) {
+                int bi, br;
+                if (wifi_scan_best(&bi, &br) && bi != s_ssid_cur) {
+                    ESP_LOGW(TAG, "scan best: %s (%d dBm)", s_ssid_tab[bi], br);
+                    idx = bi;
+                }
+            }
+            if (idx < 0) idx = s_ssid_cur < 0 ? 0 : s_ssid_cur;
+            wifi_apply(idx);
+            esp_wifi_connect();
+        }
+
         if (s_wifi_up && now - last_rssi_ms > 5000) {
             last_rssi_ms = now;
             wifi_ap_record_t ap;
             if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
                 g_app.rssi = ap.rssi;
+                /* weak link: look for a clearly better home (with margin and
+                 * rate limit so we never oscillate between near-equal APs) */
+                if (s_ssid_n >= 2 && (int)ap.rssi < MRRC_SSID_WEAK &&
+                    now - last_ssid_eval_ms > MRRC_SSID_EVAL_MS) {
+                    last_ssid_eval_ms = now;
+                    int bi, br;
+                    if (wifi_scan_best(&bi, &br) && bi != s_ssid_cur &&
+                        br > (int)ap.rssi + MRRC_SSID_MARGIN) {
+                        ESP_LOGW(TAG, "weak %d dBm; %s at %d -> switch",
+                                 (int)ap.rssi, s_ssid_tab[bi], br);
+                        s_force_idx = bi;
+                        esp_wifi_disconnect();
+                    }
+                }
             }
         }
 

@@ -7,6 +7,12 @@ menu "MRRC Handheld"
         config MRRC_WIFI_PASSWORD
             string "Wi-Fi password"
             default ""
+        config MRRC_WIFI_SSID2
+            string "Wi-Fi SSID (secondary)"
+            default ""
+        config MRRC_WIFI_PASSWORD2
+            string "Wi-Fi password (secondary; empty reuses the primary one)"
+            default ""
         config MRRC_WIFI_MAX_RETRY
             int "Wi-Fi connect retries before reboot"
             default 30
